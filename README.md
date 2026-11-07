@@ -55,16 +55,23 @@ commit.
 | Email on time but its wake-up signal stuck → timer path consumes it, run not expired | [races](tests/failure-scenarios/races.test.ts) |
 | Email exactly at the deadline → consumed **or** expired, never both | [races](tests/failure-scenarios/races.test.ts) |
 | Worker down during the wait → run resumes, deadline unchanged | [restart](tests/failure-scenarios/restart.test.ts) |
+| An activity that fails for good, or a workflow that disappears → run finalized visibly; a lost send becomes `unknown` with an incident | [stuck-runs](tests/failure-scenarios/stuck-runs.test.ts) |
+| Evidence that arrives without a wake-up signal is still noticed (periodic re-check) | [stuck-runs](tests/failure-scenarios/stuck-runs.test.ts) |
+| A late acceptance wakes the run, or releases a finished run's conversation; an operator's "not sent" is overridden, so no second DM | [send-ledger](tests/integration/send-ledger.test.ts), [waits](tests/integration/waits.test.ts) |
+| Operator resolution racing with run finalization never strands a conversation | [api](tests/integration/api.test.ts) |
+| No question or clarification after the deadline; a valid email in the backlog beats earlier invalid ones | [waits](tests/integration/waits.test.ts) |
+| Pausing an account holds conversations; resume continues them | [stuck-runs](tests/failure-scenarios/stuck-runs.test.ts) |
 | Relay down / crash between ack and routing → nothing lost | [restart](tests/failure-scenarios/restart.test.ts) |
 | No reply → `expired`; a late email is not consumed | [workflow](tests/integration/workflow.test.ts), [waits](tests/integration/waits.test.ts) |
 | CRM down → the person still gets the link; lead syncs exactly once later; incident opens and resolves | [crm-and-alerts](tests/failure-scenarios/crm-and-alerts.test.ts) |
 | Revoked token → account paused, actionable alert without personal data | [crm-and-alerts](tests/failure-scenarios/crm-and-alerts.test.ts) |
+| A capability missing from the account's adapter contract blocks the send | [send-ledger](tests/integration/send-ledger.test.ts) |
 | Windows, per-recipient cap, shared account budget, cancel are enforced right before each send | [send-ledger](tests/integration/send-ledger.test.ts) |
 | Editing an automation never changes a running conversation | [workflow](tests/integration/workflow.test.ts) |
 | Cancel / STOP / human takeover stop further sends; an unknown send keeps the conversation held | [cancel-and-stop](tests/failure-scenarios/cancel-and-stop.test.ts) |
 | Tenants with identical external ids never mix (enforced by composite FKs) | [routing](tests/integration/routing.test.ts), [api](tests/integration/api.test.ts), [schema](tests/integration/schema.test.ts) |
 
-`npm test` → 16 files, 119 tests, about 11 seconds.
+`npm test` → 17 files, 140 tests, about 11–14 seconds.
 
 ## Run it
 

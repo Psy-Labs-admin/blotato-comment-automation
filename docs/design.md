@@ -3,10 +3,11 @@
 > When someone comments "pricing" on any Instagram post: reply "Sent you a DM!", DM them asking for
 > their email, wait for the answer, then DM them a link.
 
-This document describes the backend that runs that automation, and automations like it. Every
-behaviour described here is implemented in this repository. Where a statement is backed by an
-automated test, the README's guarantee table links to that test. Things that are *not* implemented
-are listed in [§15](#15-limitations-and-next-steps).
+This document describes the backend that runs that automation, and automations like it. Behaviour
+described here is implemented in this repository unless [§15](#15-limitations-and-next-steps) lists
+it as not implemented. Where a statement is backed by an automated test, the README's guarantee
+table links to that test. The design went through an independent review; the findings and their
+fixes are summarised in [AI_USAGE.md](../AI_USAGE.md).
 
 ---
 
@@ -21,8 +22,10 @@ What the system guarantees, in the order a customer would care:
 3. **When we do not know whether a message was delivered, we say so.** The send becomes `unknown`.
    The conversation is held, nothing is resent blindly, an operator is alerted, and the timeline
    shows exactly where it stopped.
-4. **A conversation survives restarts.** Waiting for the person's email can last days. That wait
-   survives deploys, worker crashes and relay downtime, and its deadline never moves.
+4. **A conversation survives restarts, and always ends visibly.** Waiting for the person's email can
+   last days. That wait survives deploys, worker crashes and relay downtime, and its deadline never
+   moves. Every run reaches a recorded end state: nothing stays "running" forever because its driver
+   disappeared.
 5. **Integrations are not on the critical path.** A CRM outage does not stop the person from getting
    the link. The lead syncs once the CRM is back, exactly once per idempotency key.
 
@@ -143,9 +146,11 @@ for Temporal commands and one for integrations, so a slow CRM never delays workf
 
 ## 5. Data model
 
-All tenant data carries `tenant_id`. **Composite foreign keys `(id, tenant_id)`** make it impossible
-for a row to reference another tenant's conversation, connection or automation. A query bug fails
-loudly instead of mixing customers' data. External ids are always scoped by `connection_id`.
+All tenant data carries `tenant_id`. **Composite foreign keys `(id, tenant_id)`** on every
+tenant-scoped reference make it impossible for a row to reference another tenant's conversation,
+connection, run, version, event or wait. A query bug fails loudly instead of mixing customers' data.
+`run_controls`, `message_attempts` and `send_budget` have no tenant column of their own; they hang
+off a tenant-scoped parent. External ids are always scoped by `connection_id`.
 Usernames are never identifiers. Schema: [`migrations/001_init.sql`](../migrations/001_init.sql).
 
 | Table | Purpose | Key constraints |
@@ -240,6 +245,9 @@ marks the row done or schedules a retry with jittered exponential backoff (dead-
   Postgres (I2), so it does not depend on Temporal's workflow-id retention.
 - `workflow.signal` to a workflow that has not started yet is retried later, never dropped. A signal
   to a finished run is dropped (nothing left to wake).
+- Temporal commands are **never dead-lettered**: a Temporal outage only delays them (visible as
+  `outbox_oldest_pending_seconds`). CRM and alert rows dead-letter after their retry budget and raise
+  an incident.
 
 **6.4 The workflow** (`src/workflows/commentAutomation.ts`) walks the steps. Before a send that
 prompts an `await_input`, it calls `prepareWait`. After the prompt is accepted, it calls
@@ -251,20 +259,34 @@ loop:
   r = evaluateWait(waitId)                 # under the conversation lock, reads the inbox itself
   valid    → next step
   clarify  → send clarification (ledger), loop
-  waiting  → condition(inboxDirty || cancelled, timeout = r.msUntilDeadline)
+  waiting  → condition(inboxDirty || cancelled, timeout = min(r.msUntilDeadline, recheckMs))
   expired  → finish(expired)
   cancelled→ finish(cancelled)
 ```
 
 Signals are **wake-ups, not data**. Lost, duplicated or reordered signals cannot change the outcome,
-because the activity re-reads the inbox. The timer uses the deadline stored in Postgres, the same
-value the activity checks. The workflow is deterministic: no I/O, all facts come back from
-activities.
+because the activity re-reads the inbox, and every wait also re-checks Postgres on its own every
+`recheckMs` (10 min in production). A lost signal costs minutes, not a stuck run. The timer uses the
+deadline stored in Postgres, the same value the activity checks. The workflow is deterministic: no
+I/O, all facts come back from activities.
 
-**6.5 Finalisation** (`finalizeRun`) records the outcome, closes open waits and releases the
-conversation **only if no intent of the run is `in_flight`/`unknown`**. Otherwise the conversation
-stays held until the uncertainty is resolved (`releaseIfSettled`, also called by the operator
-endpoint).
+**Guaranteed end state.**
+- DB and send activities retry with backoff: 40 attempts with a 30 s cap, about 15–20 minutes in total.
+- If an activity still fails, the workflow catches the `ActivityFailure` and finalizes the run as
+  `failed: activity_failed`. The finalizer retries until Postgres is reachable again.
+- If the workflow itself disappears (terminated, history limit, a bug), the **orphan reconciler** in
+  the relay role finalizes every unfinished run whose workflow is closed, as `failed: workflow_closed`.
+- Either way, a send left `in_flight` becomes a visible `unknown` with an incident.
+
+**6.5 Finalisation** (`finalizeRun`):
+1. Any still-`in_flight` intent becomes `unknown`.
+2. The outcome is recorded and open waits are closed.
+3. The conversation is released **only if no intent of the run is unresolved**. Otherwise it stays
+   held until the uncertainty is resolved.
+
+Whoever settles an unknown send later (a late result, reconciliation, an operator) calls
+`onIntentSettled`. It releases the conversation of a finished run, or wakes the active run. The
+cooldown starts only if the run actually reached the person (at least one accepted send).
 
 ## 7. External sends: the ledger protocol
 
@@ -285,20 +307,23 @@ Tx1  (conversation row lock)
   if this is a question: fix boundary_seq / prompt_started_at / deadline (once)
 COMMIT                                   ← before any network I/O
 HTTP call (adapter: one attempt, timeout, no retries)
-Tx2  record attempt outcome; update intent only if current_attempt_id still matches (fencing)
+Tx2  (conversation lock, then intent) record the attempt outcome; update the intent only if this
+     attempt still owns it (fencing); a late acceptance settles the intent and wakes / releases
 ```
+
+Tx1 also refuses a question or a clarification whose wait deadline has passed (`deadline_passed`).
 
 **Outcome classification** (`src/adapters/instagram.ts`):
 
 | Response | Class | Ledger action |
 |---|---|---|
 | 2xx with message id | `accepted` | done, store provider id |
-| 4xx with a permanent code | `rejected` | fail the step, no retry |
-| 401 / OAuth code 190 | `rejected` (`unauthorized`) | fail, **pause all sends of the account**, incident |
-| 429, 503 + `x-not-processed`, connection refused/DNS failure | `not_sent` (provably no effect) | intent back to `pending`, workflow sleeps `retry-after`, same intent retried (≤ 8 deferrals) |
+| 4xx with a message-level code (e.g. 10 "outside allowed window", 551 "person unavailable") | `rejected` | fail the step, no retry |
+| 401 / Graph code 190 or 102 | `rejected` (`unauthorized`) | fail the step, **pause all sends of the account** (other runs wait), incident |
+| 429, Graph throttling codes 4/17/32/613, 503 + `x-not-processed`, connection refused/DNS failure | `not_sent` (provably no effect) | intent back to `pending`, workflow sleeps `retry-after`, same intent retried (at most 24 h of deferral in total) |
 | timeout, socket reset, other 5xx, 2xx without id | `unknown` | hold, incident, **no automatic resend** |
 
-**Why the send activity may be retried by Temporal (3 attempts):** every entry goes through Tx1.
+**Why the send activity may be retried by Temporal:** every entry goes through Tx1.
 The crash cases that matter are covered by tests with real sockets:
 
 - *Instagram accepted → worker died before Tx2 → Temporal retried*: Tx1 finds `in_flight` → `unknown`.
@@ -306,8 +331,10 @@ The crash cases that matter are covered by tests with real sockets:
 - *Worker died after Tx2, before Temporal got the result*: Tx1 finds `accepted` → returns it.
 - *Slow attempt still running while a retry starts*: the retry marks `unknown`. When the slow
   attempt later gets Instagram's acceptance, that is authoritative evidence for **this attempt**, so
-  the fenced Tx2 resolves the intent as `accepted` (`resolved_by = late_result`). Any other stale
-  result is recorded on the attempt row only.
+  the fenced Tx2 resolves the intent as `accepted` (`resolved_by = late_result`) and wakes the run,
+  or releases the conversation of a finished one. This also covers "the operator said not sent,
+  then the acceptance arrived": the intent becomes `accepted`, so no second DM goes out. Any other
+  stale result is recorded on the attempt row only.
 
 **Resolving `unknown`** accepts only authoritative evidence:
 
@@ -334,6 +361,11 @@ Matching text and timestamps is not proof of identity, so the system never "gues
   then expires the wait. Platform-side delivery delay is not compensated.
 - **Skew safety.** Expiry requires `now ≥ deadline` inside the activity. If the timer fires a little
   early, the activity returns `waiting` with the remaining time and the workflow sleeps again.
+- **Nothing is asked after the deadline.** A retry of the question (for example after an operator's
+  "not sent") or a clarification is refused once the deadline has passed.
+- **The backlog is read as a whole.** If a valid email is among the unconsumed replies, it is the
+  answer. Earlier unusable messages are recorded as invalid without earning the person a "that
+  doesn't look like an email" DM. Several invalid replies earn one clarification, not several.
 
 | Race | Resolution |
 |---|---|
@@ -371,7 +403,9 @@ transaction, re-evaluated right before the call. Conditions change while an acti
 queue. In order:
 
 1. run cancel requested (`run_controls`), participant opted out, human takeover → `cancelled`
-2. account sends paused / connection not active → `blocked`
+2. account sends paused → `deferred`: the conversation waits for resume or reconnect, up to 24 h.
+   Connection not active → `blocked`. A capability the send needs is missing from the account's
+   adapter contract → `blocked: capability_unknown`.
 3. **window**: private reply only within `privateReplyWindowHours` of the comment. A regular DM only
    within `messagingWindowHours` of the participant's last DM → `blocked: window_closed`
 4. **per-recipient cap** across all automations (`recipientHourlyLimit`) → `blocked`
@@ -380,13 +414,16 @@ queue. In order:
 
 The first DM is a **private reply** to the comment (`recipient.comment_id`). Regular `send_message`
 DMs are only possible after the person replied, which the definition validator enforces. A 401 /
-expired token pauses the whole account and opens an incident ("reconnect the account").
+expired token pauses the whole account and opens an incident ("reconnect the account"). New
+triggers are suppressed (`connection_inactive`); conversations in progress wait instead of failing.
 
 **Assumptions to verify before production** (Meta pages for private replies were not reachable
 during research, so these are configuration in `capabilities`, not claims): exact private-reply
 window (default 7 days), messaging window (24h), webhook fields per login route, rate limits per app
-and per account, whether any idempotency/lookup exists. An unknown capability should mean "do not
-send". Rotating accounts, proxies or masking activity are explicitly not part of the design.
+and per account, whether any idempotency/lookup exists. Capabilities are read strictly: a limit
+the account's contract does not state blocks the sends that depend on it. Defaults are written once,
+explicitly, when a connection is created. Rotating accounts, proxies or masking activity are
+explicitly not part of the design.
 
 ## 11. Failure modes
 
@@ -395,11 +432,14 @@ send". Rotating accounts, proxies or masking activity are explicitly not part of
 | Duplicate / reordered webhooks | dedup + per-conversation seq | never |
 | API crash after ack, before routing | sweeper routes the stored event | never |
 | Relay down | commands wait in the outbox; delivered on restart | backlog age alert |
-| Temporal / worker down | ingest keeps working (signals buffered or in outbox); runs resume; deadlines unchanged | prolonged outage |
+| Temporal / worker down | ingest keeps working; Temporal commands wait in the outbox (never dead-lettered); runs resume; deadlines unchanged | prolonged outage |
+| Postgres unavailable for minutes | activities retry with backoff; after ~15–20 min the run is finalized `failed: activity_failed` (the finalizer waits for the DB) | if it happens |
+| Workflow lost (terminated, history limit) | orphan reconciler finalizes the run `failed: workflow_closed`; in-flight sends become `unknown` | if sends are unknown |
 | Worker dies mid-send | ledger → `unknown` (or stored acceptance) | if unknown cannot be reconciled |
 | Lost Instagram ack | `unknown`, conversation held, grouped incident | operator resolves via API |
-| Instagram throttling (429) | `deferred`, same intent retried after `retry-after`, ≤ 8 times | if queues stop draining |
-| Token revoked | account sends paused, incident | reconnect account |
+| Instagram throttling (429, codes 4/17/32/613) | `deferred`, same intent retried after `retry-after`, up to 24 h in total | if queues stop draining |
+| Token revoked | account sends paused (runs in progress wait), new triggers suppressed, incident | reconnect account |
+| Account paused by an operator | sends wait at the gate; no new runs start; nothing fails within 24 h | resume |
 | Window closed while queued | send blocked with reason, run fails visibly | usually never |
 | CRM down | link still sent; lead `pending`; retried with backoff; incident after 3 failures; resolves itself | sustained backlog |
 | Outbox row exhausted retries | dead-letter kept, incident | inspect + redeliver |
@@ -444,7 +484,9 @@ send". Rotating accounts, proxies or masking activity are explicitly not part of
 - **Cancel a run** (`POST /runs/:id/cancel`): one transaction stores the authoritative cancel and the
   wake-up command. The response is `cancel_requested`, not "stopped": an in-flight send cannot be
   recalled, and a run with an unknown send keeps the conversation held.
-- **Pause an account** (`POST /connections/:id/pause`): the gate blocks all new sends immediately.
+- **Pause an account** (`POST /connections/:id/pause`): the gate holds all sends immediately and no
+  new runs start. `resume` lets conversations in progress continue. A pause longer than 24 h fails
+  the waiting sends visibly.
 - **Edit a definition**: publishes a new version for new runs only. Migrating active runs would be a
   separate, explicit operation.
 - **Deploy worker code**: workflow changes must be replay-safe (`patched()` or Temporal Worker
@@ -458,7 +500,13 @@ Illustrative profile (an assumption, not Blotato data): 100k inbound events/day,
 - Ingest is one short transaction per event, contending only per conversation. 100/s is far from
   Postgres limits. A viral post spreads across many conversations, not one row.
 - Concurrent waits ≈ new conversations/day × average wait duration. Waiting workflows cost Temporal
-  storage, not worker CPU. Histories are short (~20–40 events per run), so no continue-as-new is needed.
+  storage, not worker CPU.
+- **History size.** A typical history is ~40–80 events. It grows by ~6–9 events per inbound DM
+  during a wait, and per re-check (every 10 min while waiting or blocked). It is not hard-bounded: a
+  participant sending thousands of DMs into one wait, or a send blocked for weeks, would approach
+  Temporal's limits. The mitigation is `continueAsNew` with the step index and wait ids when
+  `workflowInfo().continueAsNewSuggested`; it is not implemented. Until then the orphan reconciler
+  finalizes such a run visibly instead of losing it.
 - Hot paths are indexed: pending outbox by kind/time, pending inbox, unresolved intents, audit by run.
 - Growth steps, in order of expected need: more relay/worker replicas; partition/archive
   `inbox_events` and `run_audit_events` by time with a retention policy; per-tenant fairness in the
@@ -478,5 +526,6 @@ Implemented and tested here: everything in §§2–13 except as listed below.
 - **Retention / encryption at rest** for inbox text and leads is described, not implemented.
 - **OpenTelemetry tracing** is not wired. Ids (run, intent, event) are on every audit row and log line instead.
 - **Workflow replay tests** and Worker Versioning setup are described, not implemented.
+- **`continueAsNew`** for unusually long histories is described (§14), not implemented.
 - **Load testing** has not been done. The numbers in §14 are design targets.
 - **Edited comments, multiple platforms, visual builder, arbitrary graphs**: deliberately out of scope (§3).

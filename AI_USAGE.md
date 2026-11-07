@@ -58,6 +58,45 @@ These were taken during implementation without asking me, and are recorded so I 
 - The "stuck signal" scenario finished too fast to prove anything, because the email could be read
   before the workflow parked. It now waits for the timer and asserts the lead was created after the deadline.
 
+## Independent review and what it changed
+
+After implementation, a separate AI reviewer with no shared context read the whole branch against
+the plan and the spec. Its verdict was "ready with fixes". The main findings and their fixes, each
+reproduced first by a failing test:
+
+- **Critical: stuck runs.** If an activity ran out of retries (for example during a short database
+  outage), the workflow failed without finalizing the run. The run stayed "running" and the
+  conversation was held forever, silently. Now:
+  - retries are long but bounded;
+  - the workflow catches the failure and finalizes the run as `activity_failed`, through a
+    finalizer that retries until the database is back;
+  - in-flight sends become a visible `unknown`;
+  - an orphan reconciler finalizes runs whose workflow disappeared.
+- **Late results.** A late provider acceptance settled the send but did not wake the waiting run,
+  and did not release a finished run's conversation. A shared `onIntentSettled` now does both, and
+  every wait re-checks Postgres periodically, so a lost signal can no longer strand a run.
+- **Lock order.** Operator resolution could race with run finalization and hold a conversation
+  forever. Both now take the conversation lock first.
+- **No question after the deadline.** Questions and clarifications are refused once the wait
+  deadline has passed.
+- **Pause means pause.** Pausing an account (or a revoked token) failed conversations in progress
+  and started cooldowns even when nothing was sent. Pause now defers sends, and the cooldown starts
+  only if something was sent.
+- **Error codes.** Graph error code 10 (a per-message permission error) paused the whole account.
+  Only 401/190/102 count as auth errors now, and throttling codes count as "not sent".
+- **Unknown capabilities forbid sends**, as the spec requires, instead of silently falling back to
+  defaults.
+- **Composite tenant foreign keys** were missing on several tables, so the README's isolation claim
+  was not fully true. They now cover every tenant-scoped reference.
+- **Smaller fixes that change what a person sees:**
+  - a valid email already in the backlog no longer triggers a "doesn't look like an email" DM;
+  - "STOP!!" and "Stop 🙏" are honoured;
+  - an emoji-only keyword is rejected at publish time;
+  - one unroutable event no longer stalls the sweeper;
+  - "operator said not sent, then the late acceptance arrived" no longer sends twice.
+- **Deferred** (minor, noted in the plan ledger): stricter email local-part rules, jitter on deferral
+  wake-ups, DB-assigned receive time, `/funnel?since=` validation.
+
 ## What was not verified
 
 - `docker compose up` was **not** exercised end to end on the machine where this was built (its

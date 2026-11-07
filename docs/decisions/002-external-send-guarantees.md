@@ -28,12 +28,16 @@ Option 3 (`src/activities/send.ts`):
   `in_flight` into `unknown`, run the policy gate, reserve the attempt. **Commit before the HTTP call;**
 - adapter: one call, timeout, no internal retries. Results are classified as
   `accepted / rejected / not_sent / unknown`;
-- Tx2 is fenced on `current_attempt_id`. A late acceptance of the *same* attempt is authoritative
-  and resolves an `unknown`. Other stale results are recorded on the attempt only;
+- Tx2 takes the conversation lock, then the intent, and is fenced on `current_attempt_id`. A late
+  acceptance of the *same* attempt is authoritative: it resolves an `unknown` (or an operator's
+  premature "not sent"), then wakes the run or releases a finished run's conversation. Other stale
+  results are recorded on the attempt only;
 - `unknown` is resolved only by authoritative evidence: an adapter lookup by client reference (when
   the contract has one) or an audited operator decision. Never by matching text or timestamps;
 - the conversation stays held while any send is `in_flight`/`unknown`, so no other automation
-  talks to the person until we know what they received.
+  talks to the person until we know what they received;
+- retries are bounded. When they run out, the run fails visibly and in-flight sends become
+  `unknown`, so the protocol never hangs without a visible result.
 
 ## Consequences
 

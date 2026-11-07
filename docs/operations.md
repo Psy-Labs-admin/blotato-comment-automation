@@ -36,9 +36,18 @@ Each Telegram/sink alert names the class, account, number of affected conversati
 Never bulk-resolve as `not_sent`. That is how people get duplicate DMs.
 
 ### `connection_unauthorized`: token revoked or expired
-Sends for the account are paused and new triggers are suppressed (`connection_inactive`). After the
-customer reconnects: `POST /connections/:id/resume`. Runs that failed are not restarted
-automatically, because a stale conversation should not suddenly resume.
+Sends for the account are paused and new triggers are suppressed (`connection_inactive`).
+Conversations in progress wait at the gate instead of failing. After the customer reconnects, call
+`POST /connections/:id/resume`: waiting conversations continue within about a minute. Sends that
+waited longer than 24 h have already failed visibly, and they are not restarted automatically,
+because a stale conversation should not suddenly resume.
+
+### Runs ending as `activity_failed` or `workflow_closed`
+`activity_failed`: a database or provider dependency kept failing for about 15–20 minutes, so the run
+was ended deliberately. `workflow_closed`: the orphan reconciler found the run's workflow gone
+(terminated, history limit). In both cases a send that was in flight is now `unknown` (see above),
+and the conversation is released only once nothing is unresolved. Investigate the cause; affected
+people can trigger again after the cooldown.
 
 ### `crm_delivery_failing`
 Conversations are unaffected. Leads stay `pending` and are retried with backoff. Fix the CRM side;
@@ -49,6 +58,8 @@ fixed. The idempotency key makes this safe.
 
 ### `outbox_dead_letter`
 Inspect `SELECT kind, last_error FROM outbox WHERE status='dead'`. Redeliver as above after fixing.
+Only CRM and alert rows can dead-letter. Temporal start/signal commands retry indefinitely, so watch
+`outbox_oldest_pending_seconds{kind=~"workflow.*"}` for Temporal outages instead.
 
 ## Controls
 
@@ -57,7 +68,7 @@ Inspect `SELECT kind, last_error FROM outbox WHERE status='dead'`. Redeliver as 
 | Stop one run | `POST /runs/:id/cancel` | gate refuses further sends; workflow ends `cancelled`; an in-flight send may still land |
 | Person asks to stop | DM "STOP" (automatic) or `POST /conversations/:id/opt-out` | no automated sends to them again |
 | Agent takes over | `POST /conversations/:id/takeover` / `release-takeover` | automation steps back |
-| Stop an account | `POST /connections/:id/pause` / `resume` | all automated sends of the account blocked at the gate |
+| Hold an account | `POST /connections/:id/pause` / `resume` | sends wait at the gate (up to 24 h) and no new runs start; resume continues conversations in progress |
 | Stop an automation | `POST /automations/:id/disable` | no new runs; running ones continue |
 | Change copy/link | `POST /automations/:id/versions` | new runs only |
 
