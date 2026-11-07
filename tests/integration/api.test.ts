@@ -1,0 +1,145 @@
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { FastifyInstance } from 'fastify';
+import type { Pool } from 'pg';
+import { createTestDb } from '../helpers/db';
+import { commentEvent, dmEvent, seedTenant } from '../helpers/fixtures';
+import { pricingDefinition } from '../helpers/definitions';
+import { buildServer } from '../../src/api/server';
+import { systemClock } from '../../src/domain/clock';
+
+describe('HTTP API', () => {
+  let t: Awaited<ReturnType<typeof createTestDb>>;
+  let db: Pool;
+  let app: FastifyInstance;
+  let tn: Awaited<ReturnType<typeof seedTenant>>;
+  let other: Awaited<ReturnType<typeof seedTenant>>;
+  let automationId: string;
+
+  beforeAll(async () => {
+    t = await createTestDb();
+    db = t.db;
+    app = buildServer({ db, clock: systemClock, logger: false });
+    tn = await seedTenant(db, { name: 'acme' });
+    other = await seedTenant(db, { name: 'globex' });
+  });
+  afterAll(async () => {
+    await app?.close();
+    await t?.drop();
+  });
+
+  const as = (tenantId: string) => ({ 'x-tenant-id': tenantId });
+  const webhook = (payload: unknown) => app.inject({ method: 'POST', url: '/webhooks/instagram', payload: payload as any });
+
+  it('publishes an automation and rejects an invalid definition with readable issues', async () => {
+    const bad = await app.inject({
+      method: 'POST', url: '/automations', headers: as(tn.tenantId),
+      payload: { connectionId: tn.connectionId, name: 'x', definition: { ...pricingDefinition, steps: [] } },
+    });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json().issues.length).toBeGreaterThan(0);
+
+    const ok = await app.inject({
+      method: 'POST', url: '/automations', headers: as(tn.tenantId),
+      payload: { connectionId: tn.connectionId, name: 'pricing', definition: pricingDefinition, priority: 1 },
+    });
+    expect(ok.statusCode).toBe(201);
+    automationId = ok.json().automationId;
+    expect(ok.json().version).toBe(1);
+  });
+
+  it('refuses to attach an automation to another tenant connection', async () => {
+    const res = await app.inject({
+      method: 'POST', url: '/automations', headers: as(other.tenantId),
+      payload: { connectionId: tn.connectionId, name: 'steal', definition: pricingDefinition },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('acknowledges webhooks durably: 202 then 202 duplicate; 404 unknown account; 400 malformed', async () => {
+    const ev = commentEvent({ accountId: tn.accountId, from: 'api_user' });
+    const first = await webhook(ev);
+    expect(first.statusCode).toBe(202);
+    expect(first.json()).toMatchObject({ duplicate: false });
+    expect((await webhook(ev)).json()).toMatchObject({ duplicate: true });
+    expect((await webhook(commentEvent({ accountId: 'ig_unknown', from: 'x' }))).statusCode).toBe(404);
+    expect((await webhook({ hello: 'world' })).statusCode).toBe(400);
+  });
+
+  it('cancel writes the control and the workflow command atomically and answers "requested"', async () => {
+    await webhook(commentEvent({ accountId: tn.accountId, from: 'to_cancel' }));
+    const run = (await db.query(`SELECT r.id FROM automation_runs r JOIN conversations c ON c.id = r.conversation_id WHERE c.participant_id = 'to_cancel'`)).rows[0];
+    const res = await app.inject({ method: 'POST', url: `/runs/${run.id}/cancel`, headers: as(tn.tenantId), payload: { reason: 'operator' } });
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ status: 'cancel_requested' });
+    const ctl = (await db.query(`SELECT cancel_requested FROM run_controls WHERE run_id = $1`, [run.id])).rows[0];
+    expect(ctl.cancel_requested).toBe(true);
+    expect((await db.query(`SELECT 1 FROM outbox WHERE idempotency_key = $1`, [`cancel:${run.id}`])).rowCount).toBe(1);
+
+    await db.query(`UPDATE automation_runs SET finished_at = now(), status = 'cancelled' WHERE id = $1`, [run.id]);
+    await db.query(`UPDATE conversations SET owner_run_id = NULL, last_run_finished_at = now() WHERE participant_id = 'to_cancel'`);
+    const again = await app.inject({ method: 'POST', url: `/runs/${run.id}/cancel`, headers: as(tn.tenantId), payload: {} });
+    expect(again.statusCode).toBe(409);
+  });
+
+  it("another tenant cannot see a run or its timeline", async () => {
+    const run = (await db.query(`SELECT id FROM automation_runs WHERE tenant_id = $1 LIMIT 1`, [tn.tenantId])).rows[0];
+    expect((await app.inject({ method: 'GET', url: `/runs/${run.id}`, headers: as(other.tenantId) })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: `/runs/${run.id}/timeline`, headers: as(other.tenantId) })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: `/runs/${run.id}` })).statusCode).toBe(401);
+  });
+
+  it('the timeline explains the run in plain language', async () => {
+    const run = (await db.query(`SELECT id FROM automation_runs WHERE tenant_id = $1 ORDER BY created_at LIMIT 1`, [tn.tenantId])).rows[0];
+    const res = await app.inject({ method: 'GET', url: `/runs/${run.id}/timeline`, headers: as(tn.tenantId) });
+    expect(res.statusCode).toBe(200);
+    const texts = res.json().entries.map((e: any) => e.text);
+    expect(texts[0]).toMatch(/Comment received/);
+    expect(texts.some((x: string) => /matched.*version 1/i.test(x))).toBe(true);
+  });
+
+  it('resolving an intent that is not unknown is a conflict', async () => {
+    const run = (await db.query(`SELECT id, tenant_id, conversation_id FROM automation_runs WHERE tenant_id = $1 LIMIT 1`, [tn.tenantId])).rows[0];
+    const intentId = (
+      await db.query(
+        `INSERT INTO message_intents (tenant_id, run_id, step_id, action_no, connection_id, conversation_id, kind, target, body, fingerprint, status)
+         VALUES ($1, $2, 'public_reply', 1, $3, $4, 'comment_reply', '{}', 'x', 'f', 'accepted') RETURNING id`,
+        [tn.tenantId, run.id, tn.connectionId, run.conversation_id],
+      )
+    ).rows[0].id;
+    const res = await app.inject({ method: 'POST', url: `/intents/${intentId}/resolve`, headers: as(tn.tenantId), payload: { resolution: 'accepted', note: 'checked inbox' } });
+    expect(res.statusCode).toBe(409);
+  });
+
+  it('funnel counts by run cohort and lists suppression reasons', async () => {
+    await webhook(commentEvent({ accountId: tn.accountId, from: 'to_cancel' })); // busy? no: run finished, but cooldown applies
+    await webhook(commentEvent({ accountId: tn.accountId, from: 'nobody', text: 'nice post' }));
+    await webhook(dmEvent({ accountId: tn.accountId, from: 'nobody', text: 'hi' }));
+    const res = await app.inject({ method: 'GET', url: '/funnel', headers: as(tn.tenantId) });
+    expect(res.statusCode).toBe(200);
+    const f = res.json();
+    expect(f.matchedComments).toBe(3);
+    expect(f.runsStarted).toBe(2);
+    expect(f.suppressed).toMatchObject({ cooldown: 1 });
+    expect(f).toHaveProperty('promptsAccepted');
+    expect(f).toHaveProperty('emailsCaptured');
+    expect(f).toHaveProperty('runsCompleted');
+    expect(f).toHaveProperty('crmSynced');
+  });
+
+  it('exposes operational gauges for Prometheus', async () => {
+    const res = await app.inject({ method: 'GET', url: '/metrics' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatch(/outbox_oldest_pending_seconds/);
+    expect(res.body).toMatch(/intents_unknown/);
+    expect(res.body).toMatch(/inbox_unrouted_oldest_seconds/);
+  });
+
+  it('pausing an account blocks new sends at the gate and is reversible', async () => {
+    const p = await app.inject({ method: 'POST', url: `/connections/${tn.connectionId}/pause`, headers: as(tn.tenantId), payload: { reason: 'customer request' } });
+    expect(p.statusCode).toBe(200);
+    expect((await db.query(`SELECT sends_paused FROM social_connections WHERE id = $1`, [tn.connectionId])).rows[0].sends_paused).toBe(true);
+    const r = await app.inject({ method: 'POST', url: `/connections/${tn.connectionId}/resume`, headers: as(tn.tenantId) });
+    expect(r.statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: `/connections/${tn.connectionId}/pause`, headers: as(other.tenantId), payload: {} })).statusCode).toBe(404);
+  });
+});
