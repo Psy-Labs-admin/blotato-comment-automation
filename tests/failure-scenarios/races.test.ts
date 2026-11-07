@@ -6,7 +6,9 @@ import { publishVersion } from '../../src/storage/admin';
 describe('races between replies, signals, timers and acknowledgements', () => {
   let h: Harness;
   beforeAll(async () => {
-    h = await createHarness({ sendTimeoutMs: 4_000 });
+    // Long re-check: these tests prove the signal and deadline-timer paths on their own
+    // (the periodic re-check path is covered in stuck-runs.test.ts).
+    h = await createHarness({ sendTimeoutMs: 4_000, recheckMs: 60_000 });
   });
   afterAll(async () => h?.close());
 
@@ -35,13 +37,16 @@ describe('races between replies, signals, timers and acknowledgements', () => {
     await h.waitForRun(runId!, 'waiting_input');
     await new Promise((r) => setTimeout(r, 500)); // let the workflow park on its deadline timer
     await h.temporalRelay.stop(); // signals stay in the outbox
-    await h.dm('stuck_signal', 'stuck@example.com');
-    expect((await h.waitForRun(runId!, undefined, 15_000)).status).toBe('completed');
-    expect(h.messagesFor('stuck_signal')).toHaveLength(1);
-    // Proof that the timer path (not a signal) consumed it: the lead was created after the deadline.
-    const [lead, wait] = [await h.lead(runId!), await h.wait(runId!)];
-    expect(lead.created_at.getTime()).toBeGreaterThanOrEqual(wait.deadline.getTime());
-    h.temporalRelay.start(); // the late signal reaches a finished run and is dropped harmlessly
+    try {
+      await h.dm('stuck_signal', 'stuck@example.com');
+      expect((await h.waitForRun(runId!, undefined, 15_000)).status).toBe('completed');
+      expect(h.messagesFor('stuck_signal')).toHaveLength(1);
+      // Proof that the timer path (not a signal) consumed it: the lead was created after the deadline.
+      const [lead, wait] = [await h.lead(runId!), await h.wait(runId!)];
+      expect(lead.created_at.getTime()).toBeGreaterThanOrEqual(wait.deadline.getTime());
+    } finally {
+      h.temporalRelay.start(); // the late signal reaches a finished run and is dropped harmlessly
+    }
     await h.waitFor(
       async () => (await h.db.query(`SELECT count(*)::int AS n FROM outbox WHERE status = 'pending' AND kind = 'workflow.signal'`)).rows[0].n === 0,
       10_000,

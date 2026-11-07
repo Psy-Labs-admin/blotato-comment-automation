@@ -74,63 +74,74 @@ export async function evaluateWait(deps: ActivityDeps, i: { waitId: string }): P
       return { kind: 'cancelled', reason: cancelReason ?? Reason.RUN_CANCELLED };
     }
 
-    // A clarification already decided but not yet confirmed sent is returned again (retry-safe).
-    const owed = await owedClarification(c, w);
-    if (owed) return { kind: 'clarify', actionNo: owed };
-
     const now = deps.clock.now();
     if (w.status !== 'active' || !w.deadline) {
       // Prompt not confirmed yet: replies stay stored, nothing is consumed.
       return { kind: 'waiting', msUntilDeadline: w.deadline ? Math.max(0, new Date(w.deadline).getTime() - now.getTime()) : w.timeout_ms };
     }
+    const pastDeadline = now.getTime() >= new Date(w.deadline).getTime();
 
-    const candidates = await c.query(
-      `SELECT e.id, e.text FROM inbox_events e
-         LEFT JOIN input_consumptions ic ON ic.inbox_event_id = e.id
-        WHERE e.conversation_id = $1 AND e.event_type = 'message.received' AND ic.inbox_event_id IS NULL
-          AND e.seq > $2 AND e.received_at <= $3
-          AND e.routing_outcome IS DISTINCT FROM $4 AND e.routing_outcome IS DISTINCT FROM $5
-        ORDER BY e.seq`,
-      [conv.id, w.boundary_seq, w.deadline, Reason.IGNORED_SELF, Reason.STOP_COMMAND],
-    );
+    // A clarification already decided but not yet confirmed sent is returned again (retry-safe),
+    // unless the deadline passed: no clarification goes out after the deadline.
+    const owed = pastDeadline ? null : await owedClarification(c, w);
+    if (owed) return { kind: 'clarify', actionNo: owed };
 
-    for (const ev of candidates.rows) {
-      const parsed = extractEmail(ev.text);
-      if (parsed.kind === 'valid') {
-        await c.query(`INSERT INTO input_consumptions (inbox_event_id, wait_id, tenant_id, result) VALUES ($1, $2, $3, 'valid')`, [
-          ev.id, w.id, w.tenant_id,
-        ]);
-        const leadId: string = (
-          await c.query(
-            `INSERT INTO leads (tenant_id, connection_id, conversation_id, participant_id, run_id, source_event_id, email)
-             VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-            [w.tenant_id, conv.connection_id, conv.id, conv.participant_id, w.run_id, ev.id, parsed.email],
-          )
-        ).rows[0].id;
-        await c.query(`UPDATE input_waits SET status = 'consumed', consumed_event_id = $2, lead_id = $3, closed_at = $4 WHERE id = $1`, [
-          w.id, ev.id, leadId, now,
-        ]);
-        // CRM sync is a separate, independently retried delivery: a CRM outage never blocks the DM.
-        await enqueueOutbox(c, { tenantId: w.tenant_id, kind: 'crm.lead_captured', idempotencyKey: `lead:${leadId}`, payload: { leadId } });
-        await audit(c, { ...base, eventId: ev.id, type: 'input.accepted', reason: Reason.EMAIL_VALID, data: { leadId } });
-        deps.onOutbox?.();
-        return { kind: 'valid', leadId };
-      }
+    const candidates = (
+      await c.query(
+        `SELECT e.id, e.text FROM inbox_events e
+           LEFT JOIN input_consumptions ic ON ic.inbox_event_id = e.id
+          WHERE e.conversation_id = $1 AND e.event_type = 'message.received' AND ic.inbox_event_id IS NULL
+            AND e.seq > $2 AND e.received_at <= $3
+            AND e.routing_outcome IS DISTINCT FROM $4 AND e.routing_outcome IS DISTINCT FROM $5
+          ORDER BY e.seq`,
+        [conv.id, w.boundary_seq, w.deadline, Reason.IGNORED_SELF, Reason.STOP_COMMAND],
+      )
+    ).rows.map((ev) => ({ ...ev, parsed: extractEmail(ev.text) }));
 
-      const result = parsed.kind === 'ambiguous' ? 'ambiguous' : 'invalid';
+    const rejectInput = async (ev: (typeof candidates)[number]) => {
+      const result = ev.parsed.kind === 'ambiguous' ? 'ambiguous' : 'invalid';
       await c.query(`INSERT INTO input_consumptions (inbox_event_id, wait_id, tenant_id, result) VALUES ($1, $2, $3, $4)`, [
         ev.id, w.id, w.tenant_id, result,
       ]);
       await audit(c, { ...base, eventId: ev.id, type: 'input.rejected', reason: result === 'ambiguous' ? Reason.EMAIL_AMBIGUOUS : Reason.EMAIL_INVALID });
-      if (w.clarifications_used < w.max_clarifications) {
-        const used = w.clarifications_used + 1;
-        await c.query(`UPDATE input_waits SET clarifications_used = $2 WHERE id = $1`, [w.id, used]);
-        await audit(c, { ...base, type: 'input.clarification_requested', data: { clarification: used } });
-        return { kind: 'clarify', actionNo: used + 1 };
-      }
+    };
+
+    // Look at the whole backlog first: if a valid email is already there, it is the answer, and the
+    // earlier unusable messages do not earn the person a "that doesn't look like an email" DM.
+    const validIdx = candidates.findIndex((ev) => ev.parsed.kind === 'valid');
+    if (validIdx >= 0) {
+      for (const ev of candidates.slice(0, validIdx)) await rejectInput(ev);
+      const ev = candidates[validIdx];
+      const email = (ev.parsed as { kind: 'valid'; email: string }).email;
+      await c.query(`INSERT INTO input_consumptions (inbox_event_id, wait_id, tenant_id, result) VALUES ($1, $2, $3, 'valid')`, [
+        ev.id, w.id, w.tenant_id,
+      ]);
+      const leadId: string = (
+        await c.query(
+          `INSERT INTO leads (tenant_id, connection_id, conversation_id, participant_id, run_id, source_event_id, email)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+          [w.tenant_id, conv.connection_id, conv.id, conv.participant_id, w.run_id, ev.id, email],
+        )
+      ).rows[0].id;
+      await c.query(`UPDATE input_waits SET status = 'consumed', consumed_event_id = $2, lead_id = $3, closed_at = $4 WHERE id = $1`, [
+        w.id, ev.id, leadId, now,
+      ]);
+      // CRM sync is a separate, independently retried delivery: a CRM outage never blocks the DM.
+      await enqueueOutbox(c, { tenantId: w.tenant_id, kind: 'crm.lead_captured', idempotencyKey: `lead:${leadId}`, payload: { leadId } });
+      await audit(c, { ...base, eventId: ev.id, type: 'input.accepted', reason: Reason.EMAIL_VALID, data: { leadId } });
+      deps.onOutbox?.();
+      return { kind: 'valid', leadId };
     }
 
-    if (now.getTime() >= new Date(w.deadline).getTime()) {
+    for (const ev of candidates) await rejectInput(ev);
+    if (candidates.length && !pastDeadline && w.clarifications_used < w.max_clarifications) {
+      const used = w.clarifications_used + 1;
+      await c.query(`UPDATE input_waits SET clarifications_used = $2 WHERE id = $1`, [w.id, used]);
+      await audit(c, { ...base, type: 'input.clarification_requested', data: { clarification: used } });
+      return { kind: 'clarify', actionNo: used + 1 };
+    }
+
+    if (pastDeadline) {
       await c.query(`UPDATE input_waits SET status = 'expired', closed_at = $2 WHERE id = $1`, [w.id, now]);
       await audit(c, { ...base, type: 'wait.expired', reason: Reason.DEADLINE_PASSED });
       return { kind: 'expired' };

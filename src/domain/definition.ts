@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { parseDuration } from './duration';
+import { tokenize } from './matching';
 
 /**
  * A published automation is a validated document: one trigger and a short, ordered list of typed steps.
@@ -66,6 +67,9 @@ export function parseDefinition(input: unknown): AutomationDefinition {
   }
   const def = parsed.data;
   const issues: string[] = [];
+  if (tokenize(def.trigger.keyword).length === 0) {
+    issues.push('trigger.keyword must contain letters or digits (otherwise it can never match a comment)');
+  }
   const seen = new Set<string>();
   let privateReplies = 0;
   let sawInput = false;

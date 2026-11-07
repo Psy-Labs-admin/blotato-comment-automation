@@ -30,8 +30,37 @@ export const DEFAULT_CAPABILITIES: Capabilities = {
   reconciliation: 'none',
 };
 
-export function resolveCapabilities(raw: unknown): Capabilities {
-  return { ...DEFAULT_CAPABILITIES, ...((raw as Partial<Capabilities>) ?? {}) };
+const NUMERIC_CAPABILITIES = [
+  'privateReplyWindowHours',
+  'messagingWindowHours',
+  'sendsPerWindow',
+  'budgetWindowSeconds',
+  'recipientHourlyLimit',
+] as const;
+
+/**
+ * Strict reading of a stored adapter contract: only well-formed values survive. Nothing is filled
+ * in from defaults here — a capability that is unknown for an account must forbid the sends that
+ * depend on it (see `missingCapabilities`). Defaults are applied once, explicitly, when a
+ * connection is created.
+ */
+export function parseCapabilities(raw: unknown): Partial<Capabilities> {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const out: Partial<Capabilities> = {};
+  for (const k of NUMERIC_CAPABILITIES) {
+    const v = r[k];
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) out[k] = v;
+  }
+  if (r.reconciliation === 'lookup_by_client_ref' || r.reconciliation === 'none') out.reconciliation = r.reconciliation;
+  return out;
+}
+
+/** Capabilities a send of this kind cannot be evaluated without. */
+export function missingCapabilities(caps: Partial<Capabilities>, kind: SendKind): string[] {
+  const required: Array<keyof Capabilities> = ['sendsPerWindow', 'budgetWindowSeconds', 'recipientHourlyLimit'];
+  if (kind === 'private_reply') required.push('privateReplyWindowHours');
+  if (kind === 'dm') required.push('messagingWindowHours');
+  return required.filter((k) => caps[k] === undefined);
 }
 
 export type SendStepResult =

@@ -4,7 +4,8 @@ import { createTestDb } from '../helpers/db';
 import { commentEvent, createAutomation, dmEvent, seedTenant } from '../helpers/fixtures';
 import { pricingWith } from '../helpers/definitions';
 import { ingestEvent } from '../../src/ingest/ingest';
-import { routeEvent } from '../../src/ingest/router';
+import { routeEvent, routePending } from '../../src/ingest/router';
+import { finalizeRun } from '../../src/activities/runs';
 import { systemClock } from '../../src/domain/clock';
 import { Reason } from '../../src/domain/reasons';
 
@@ -145,6 +146,35 @@ describe('ingest and routing', () => {
     expect(await count(`SELECT count(*) n FROM outbox WHERE idempotency_key = $1`, [`cancel:${started.route!.runId}`])).toBe(1);
     await db.query(`UPDATE conversations SET owner_run_id = NULL WHERE participant_id = 'ivy'`);
     expect((await deliver(commentEvent({ accountId: tn.accountId, from: 'ivy' }))).route!.outcome).toBe(Reason.OPTED_OUT);
+  });
+
+  it('a paused account does not start runs it could not send for (review finding)', async () => {
+    const tn = await seedTenant(db);
+    await createAutomation(db, tn);
+    await db.query(`UPDATE social_connections SET sends_paused = true WHERE id = $1`, [tn.connectionId]);
+    expect((await deliver(commentEvent({ accountId: tn.accountId, from: 'paused_p' }))).route!.outcome).toBe(Reason.SENDS_PAUSED);
+  });
+
+  it('a run that sent nothing does not start a cooldown (review finding)', async () => {
+    const tn = await seedTenant(db);
+    await createAutomation(db, tn, pricingWith({}), { cooldownSeconds: 3600 });
+    const first = await deliver(commentEvent({ accountId: tn.accountId, from: 'nothing_sent' }));
+    await finalizeRun({ db, clock: systemClock } as any, { runId: first.route!.runId!, outcome: 'failed', reason: 'sends_paused' });
+    expect((await deliver(commentEvent({ accountId: tn.accountId, from: 'nothing_sent' }))).route!.outcome).toBe(Reason.STARTED);
+  });
+
+  it('one event that cannot be routed does not stall the sweeper for the events behind it (review finding)', async () => {
+    const broken = await seedTenant(db);
+    const a = await createAutomation(db, broken);
+    await db.query(`UPDATE automation_versions SET definition = '{}' WHERE automation_id = $1`, [a.automationId]);
+    const healthy = await seedTenant(db);
+    await createAutomation(db, healthy);
+    const bad = await ingestEvent(deps(), commentEvent({ accountId: broken.accountId, from: 'poison' }));
+    const good = await ingestEvent(deps(), commentEvent({ accountId: healthy.accountId, from: 'healthy' }));
+    await routePending({ ...deps(), onError: () => undefined });
+    const row = (await db.query(`SELECT routing_outcome FROM inbox_events WHERE id = $1`, [(good as any).eventId])).rows[0];
+    expect(row.routing_outcome).toBe(Reason.STARTED);
+    expect((await db.query(`SELECT routing_status FROM inbox_events WHERE id = $1`, [(bad as any).eventId])).rows[0].routing_status).toBe('pending');
   });
 
   it('two tenants with identical participant and comment ids stay isolated', async () => {

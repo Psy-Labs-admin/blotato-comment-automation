@@ -48,7 +48,10 @@ export function extractEmail(text: string): EmailExtraction {
   return { kind: 'valid', email: [...distinct.values()][0] };
 }
 
-/** Opt-out commands are honoured only when they are the whole message. */
+/**
+ * Opt-out commands are honoured when they are the whole message, ignoring trailing punctuation,
+ * symbols and emoji ("STOP!!", "Stop 🙏"). "stop sending me these" is not matched (ambiguous).
+ */
 export function isStopCommand(text: string): boolean {
-  return /^\s*(stop|unsubscribe)\s*[.!]?\s*$/i.test(text.normalize('NFKC'));
+  return /^\s*(stop|unsubscribe)[\s\p{P}\p{S}\p{M}\u200d]*$/iu.test(text.normalize('NFKC'));
 }

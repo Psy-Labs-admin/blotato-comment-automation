@@ -21,11 +21,15 @@ export type FaultMode =
   | 'unavailable'
   | 'accept_then_drop'
   | 'accept_then_500'
-  | 'delay';
+  | 'delay'
+  | 'error';
 
 export interface Fault {
   mode: FaultMode;
   delayMs?: number;
+  /** For mode 'error': the HTTP status and Graph API error code to return (nothing is stored). */
+  httpStatus?: number;
+  code?: number;
   /** Only apply to this kind of send; other kinds pass through. */
   kind?: SendKind;
   /** Only apply when the message text contains this substring. */
@@ -124,6 +128,8 @@ export async function startFakeInstagram(port = 0): Promise<FakeInstagram> {
       case 'accept_then_500':
         record();
         return sendJson(res, 500, { error: { message: 'internal error' } });
+      case 'error':
+        return sendJson(res, fault.httpStatus ?? 400, { error: { code: fault.code ?? 100, message: 'injected error' } });
       case 'delay': {
         const m = record();
         await new Promise((r) => setTimeout(r, fault.delayMs ?? 1000));

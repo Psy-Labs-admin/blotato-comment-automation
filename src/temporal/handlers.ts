@@ -11,7 +11,7 @@ import type { commentAutomation } from '../workflows';
  *  - a signal for a workflow that is not started yet is retried later (never dropped);
  *  - a signal for a finished run is dropped (there is nothing left to wake).
  */
-export function temporalHandlers(o: { client: Client; db: Pool; taskQueue: string }): {
+export function temporalHandlers(o: { client: Client; db: Pool; taskQueue: string; recheckMs?: number }): {
   'workflow.start': OutboxHandler;
   'workflow.signal': OutboxHandler;
 } {
@@ -29,7 +29,7 @@ export function temporalHandlers(o: { client: Client; db: Pool; taskQueue: strin
         await o.client.workflow.start<typeof commentAutomation>('commentAutomation', {
           taskQueue: o.taskQueue,
           workflowId: run.workflow_id,
-          args: [{ runId, definition: run.definition }],
+          args: [{ runId, definition: run.definition, recheckMs: o.recheckMs }],
           workflowIdConflictPolicy: 'USE_EXISTING',
           workflowIdReusePolicy: 'REJECT_DUPLICATE',
         });

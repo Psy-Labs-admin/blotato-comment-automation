@@ -29,7 +29,11 @@ export interface SocialPlatform {
   lookupByClientRef?(accountId: string, clientRef: string): Promise<LookupResult>;
 }
 
-const AUTH_ERROR_CODES = new Set([190, 102, 10]);
+// Graph API error codes. 190/102: token/session invalid -> the account must be reconnected.
+// 4/17/32/613: application/user/page rate limits -> request rejected before processing.
+// Others (e.g. 10 "outside of allowed window", 551 "person isn't available") concern this message only.
+const AUTH_ERROR_CODES = new Set([190, 102]);
+const THROTTLE_ERROR_CODES = new Set([4, 17, 32, 613]);
 
 /**
  * HTTP adapter for the existing Instagram integration. No retries in here: one call, one attempt,
@@ -73,8 +77,8 @@ export class HttpInstagramAdapter implements SocialPlatform {
     if (res.status === 401 || AUTH_ERROR_CODES.has(Number(code))) {
       return { status: 'rejected', code: 'unauthorized', httpStatus: res.status };
     }
-    if (res.status === 429 || (res.status === 503 && res.headers.get('x-not-processed') === '1')) {
-      return { status: 'not_sent', code: res.status === 429 ? 'throttled' : 'unavailable', retryAfterMs: retryAfterMs(res), httpStatus: res.status };
+    if (res.status === 429 || THROTTLE_ERROR_CODES.has(Number(code)) || (res.status === 503 && res.headers.get('x-not-processed') === '1')) {
+      return { status: 'not_sent', code: res.status === 503 ? 'unavailable' : 'throttled', retryAfterMs: retryAfterMs(res), httpStatus: res.status };
     }
     if (res.status >= 400 && res.status < 500) {
       return { status: 'rejected', code: String(code ?? res.status), httpStatus: res.status };

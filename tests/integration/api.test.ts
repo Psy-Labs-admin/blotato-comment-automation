@@ -120,6 +120,32 @@ describe('HTTP API', () => {
     expect(res.statusCode).toBe(409);
   });
 
+  it('operator resolve racing with run finalization never strands the conversation (review finding)', async () => {
+    const hook = await webhook(commentEvent({ accountId: tn.accountId, from: 'race_user' }));
+    const ev = (await app.inject({ method: 'GET', url: `/events/${hook.json().eventId}`, headers: as(tn.tenantId) })).json();
+    const intentId = (
+      await db.query(
+        `INSERT INTO message_intents (tenant_id, run_id, step_id, action_no, connection_id, conversation_id, kind, target, body, fingerprint, status)
+         VALUES ($1, $2, 'send_link', 1, $3, $4, 'dm', '{}', 'x', 'f', 'unknown') RETURNING id`,
+        [tn.tenantId, ev.runId, tn.connectionId, ev.conversationId],
+      )
+    ).rows[0].id;
+    // A finalizeRun transaction is in progress: it holds the conversation lock and has decided to keep it held.
+    const t1 = await db.connect();
+    await t1.query('BEGIN');
+    await t1.query(`SELECT 1 FROM conversations WHERE id = $1 FOR UPDATE`, [ev.conversationId]);
+    await t1.query(`UPDATE automation_runs SET finished_at = now(), status = 'cancelled' WHERE id = $1`, [ev.runId]);
+    const resolving = app.inject({
+      method: 'POST', url: `/intents/${intentId}/resolve`, headers: as(tn.tenantId), payload: { resolution: 'accepted', note: 'seen in inbox' },
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    await t1.query('COMMIT');
+    t1.release();
+    expect((await resolving).statusCode).toBe(200);
+    const conv = (await db.query(`SELECT owner_run_id FROM conversations WHERE id = $1`, [ev.conversationId])).rows[0];
+    expect(conv.owner_run_id).toBeNull();
+  });
+
   it('funnel counts by run cohort and lists suppression reasons', async () => {
     await webhook(commentEvent({ accountId: tn.accountId, from: 'to_cancel' })); // busy? no: run finished, but cooldown applies
     await webhook(commentEvent({ accountId: tn.accountId, from: 'nobody', text: 'nice post' }));
@@ -127,9 +153,9 @@ describe('HTTP API', () => {
     const res = await app.inject({ method: 'GET', url: '/funnel', headers: as(tn.tenantId) });
     expect(res.statusCode).toBe(200);
     const f = res.json();
-    // api_user, event_lookup and to_cancel started runs; the second to_cancel comment hit the cooldown.
-    expect(f.matchedComments).toBe(4);
-    expect(f.runsStarted).toBe(3);
+    // api_user, event_lookup, to_cancel and race_user started runs; the second to_cancel comment hit the cooldown.
+    expect(f.matchedComments).toBe(5);
+    expect(f.runsStarted).toBe(4);
     expect(f.suppressed).toMatchObject({ cooldown: 1 });
     expect(f).toHaveProperty('promptsAccepted');
     expect(f).toHaveProperty('emailsCaptured');

@@ -154,6 +154,41 @@ describe('waits, input consumption and leads', () => {
     expect(await evaluate(r.waitId)).toEqual({ kind: 'cancelled', reason: 'operator' });
   });
 
+  it('a valid email already in the backlog wins over an earlier invalid message: no clarification (review finding)', async () => {
+    const r = await runAtPrompt({ maxClarifications: 1 });
+    await r.ask();
+    await activateWait(deps, { waitId: r.waitId });
+    await r.dm('hello?');
+    await r.dm('ok: backlog@example.com');
+    expect((await evaluate(r.waitId)).kind).toBe('valid');
+    const clar = await db.query(`SELECT 1 FROM message_intents WHERE run_id = $1 AND step_id = 'email'`, [r.runId]);
+    expect(clar.rowCount).toBe(0);
+  });
+
+  it('no clarification and no question go out after the deadline (review finding)', async () => {
+    const r = await runAtPrompt({ timeout: '1s', maxClarifications: 1 });
+    await r.ask();
+    await activateWait(deps, { waitId: r.waitId });
+    await r.dm('nope');
+    expect(await evaluate(r.waitId)).toEqual({ kind: 'clarify', actionNo: 2 });
+    await sleep(1_100);
+    expect(await evaluate(r.waitId)).toEqual({ kind: 'expired' });
+    expect(await executeSend(deps, { runId: r.runId, stepId: 'email', actionNo: 2 })).toMatchObject({ status: 'blocked', reason: Reason.DEADLINE_PASSED });
+    expect(ig.sent().filter((m) => m.kind === 'dm')).toHaveLength(0);
+  });
+
+  it('a late acceptance for a finished run releases the conversation it was holding (review finding)', async () => {
+    const r = await runAtPrompt();
+    ig.pushFault({ mode: 'delay', delayMs: 400, kind: 'private_reply' });
+    const slow = executeSend({ ...deps, platform: new HttpInstagramAdapter(ig.url, { timeoutMs: 3_000 }) }, { runId: r.runId, stepId: 'ask_email', actionNo: 1 });
+    await sleep(100);
+    expect((await r.ask()).status).toBe('unknown');
+    expect(await finalizeRun(deps, { runId: r.runId, outcome: 'cancelled', reason: 'operator' })).toEqual({ conversationReleased: false });
+    await slow;
+    const conv = (await db.query(`SELECT owner_run_id FROM conversations c JOIN automation_runs ar ON ar.conversation_id = c.id WHERE ar.id = $1`, [r.runId])).rows[0];
+    expect(conv.owner_run_id).toBeNull();
+  });
+
   it('finalizing a run keeps the conversation held while any send outcome is unknown', async () => {
     const held = await runAtPrompt();
     ig.pushFault({ mode: 'accept_then_drop', kind: 'private_reply' });

@@ -88,8 +88,8 @@ describe('worker crashes and uncertain sends', () => {
     await h.waitForRun(runId!, 'waiting_input');
     await h.dm('crash2', 'crash2@example.com');
     expect((await h.waitForRun(runId!)).status).toBe('completed');
-    const kinds = h.ig.sent().filter((m) => m.recipientId === 'crash2' || m.text === 'What email should we send the pricing to?').map((m) => m.kind);
-    expect(kinds.filter((k) => k === 'private_reply').length).toBeGreaterThanOrEqual(1);
+    const trigger = (await h.db.query(`SELECT e.comment_id FROM inbox_events e JOIN automation_runs r ON r.trigger_event_id = e.id WHERE r.id = $1`, [runId])).rows[0];
+    expect(h.ig.sent().filter((m) => m.kind === 'private_reply' && m.commentId === trigger.comment_id)).toHaveLength(1);
     for (const i of await h.intents(runId!)) expect(i.attempt_count).toBe(1);
   });
 

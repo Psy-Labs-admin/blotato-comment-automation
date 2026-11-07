@@ -37,6 +37,16 @@ describe('Instagram adapter against the fault-injecting fake', () => {
     expect(await dm('r3')).toMatchObject({ status: 'rejected', code: 'unauthorized', httpStatus: 401 });
   });
 
+  it('a per-message permission error (code 10) is a rejection, not an account auth failure (review finding)', async () => {
+    ig.pushFault({ mode: 'error', httpStatus: 400, code: 10 });
+    expect(await dm('r10')).toMatchObject({ status: 'rejected', code: '10' });
+  });
+
+  it('Graph API throttling codes on HTTP 400 mean not processed (review finding)', async () => {
+    ig.pushFault({ mode: 'error', httpStatus: 400, code: 613 });
+    expect((await dm('r11')).status).toBe('not_sent');
+  });
+
   it('classifies throttling as not_sent with a retry hint', async () => {
     ig.pushFault({ mode: 'rate_limit' });
     const out = await dm('r4');

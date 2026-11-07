@@ -46,6 +46,11 @@ describe('isStopCommand', () => {
     expect(isStopCommand(' STOP ')).toBe(true);
     expect(isStopCommand('Unsubscribe.')).toBe(true);
   });
+  it('honours STOP with trailing punctuation or emoji (review finding)', () => {
+    expect(isStopCommand('STOP!!')).toBe(true);
+    expect(isStopCommand('Stop 🙏')).toBe(true);
+    expect(isStopCommand('unsubscribe ❤️')).toBe(true);
+  });
   it('ignores stop inside a sentence', () => {
     expect(isStopCommand("don't stop sending")).toBe(false);
   });

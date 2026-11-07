@@ -51,6 +51,12 @@ describe('parseDefinition', () => {
     expect(() => parseDefinition(d)).toThrow(/private reply/);
   });
 
+  it('rejects a keyword without letters or digits, which could never match (review finding)', () => {
+    const d = clone();
+    (d.trigger as any).keyword = '🔥🔥';
+    expect(() => parseDefinition(d)).toThrow(/keyword/);
+  });
+
   it('reports schema issues with paths', () => {
     try {
       parseDefinition({ schemaVersion: 2 });

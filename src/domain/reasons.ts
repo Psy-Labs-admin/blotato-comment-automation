@@ -24,6 +24,7 @@ export const Reason = {
   WINDOW_CLOSED: 'window_closed',
   RATE_LIMITED: 'rate_limited',
   RECIPIENT_LIMIT: 'recipient_limit',
+  CAPABILITY_UNKNOWN: 'capability_unknown',
   // send outcomes
   PROVIDER_REJECTED: 'provider_rejected',
   PROVIDER_UNAUTHORIZED: 'provider_unauthorized',
@@ -36,6 +37,9 @@ export const Reason = {
   EMAIL_INVALID: 'email_invalid',
   EMAIL_AMBIGUOUS: 'email_ambiguous',
   DEADLINE_PASSED: 'deadline_passed',
+  // run lifecycle
+  ACTIVITY_FAILED: 'activity_failed',
+  WORKFLOW_CLOSED: 'workflow_closed',
 } as const;
 
 export type ReasonCode = (typeof Reason)[keyof typeof Reason];

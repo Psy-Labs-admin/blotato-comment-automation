@@ -82,6 +82,30 @@ describe('schema invariants', () => {
     await expect(consume()).rejects.toMatchObject({ code: '23505' });
   });
 
+  it('rejects a send intent that points at another tenant conversation (review finding)', async () => {
+    const other = (await db.query(`INSERT INTO tenants (name) VALUES ('mallory') RETURNING id`)).rows[0].id;
+    const run = (await db.query(`SELECT id FROM automation_runs LIMIT 1`)).rows[0];
+    await expect(
+      db.query(
+        `INSERT INTO message_intents (tenant_id, run_id, step_id, action_no, connection_id, conversation_id, kind, target, body, fingerprint)
+         VALUES ($1, $2, 's', 1, $3, $4, 'dm', '{}', 'x', 'f')`,
+        [other, run.id, connectionId, conversationId],
+      ),
+    ).rejects.toMatchObject({ code: '23503' });
+  });
+
+  it('rejects a wait that points at another tenant run (review finding)', async () => {
+    const other = (await db.query(`INSERT INTO tenants (name) VALUES ('eve') RETURNING id`)).rows[0].id;
+    const run = (await db.query(`SELECT id FROM automation_runs LIMIT 1`)).rows[0];
+    await expect(
+      db.query(
+        `INSERT INTO input_waits (tenant_id, run_id, step_id, prompt_step_id, conversation_id, status, timeout_ms, max_clarifications)
+         VALUES ($1, $2, 'x', 'y', $3, 'prepared', 1000, 0)`,
+        [other, run.id, conversationId],
+      ),
+    ).rejects.toMatchObject({ code: '23503' });
+  });
+
   it('rejects a conversation that points at another tenant connection', async () => {
     const other = (await db.query(`INSERT INTO tenants (name) VALUES ('other') RETURNING id`)).rows[0].id;
     await expect(

@@ -20,6 +20,8 @@ export interface RouterDeps {
   clock: Clock;
   /** Called after commit when outbox rows were written (lets the relay pick them up immediately). */
   onOutbox?: () => void;
+  /** Sweeper: called for an event that could not be routed (it stays pending and is retried). */
+  onError?: (err: unknown, eventId: string) => void;
 }
 
 export function workflowIdFor(runId: string): string {
@@ -54,14 +56,26 @@ export async function routeEvent(deps: RouterDeps, eventId: string): Promise<Rou
   return result;
 }
 
-/** Sweeper: routes events whose inline routing never happened (crash between ack and route). */
+/**
+ * Sweeper: routes events whose inline routing never happened (crash between ack and route).
+ * One event that keeps failing must not stall the ones behind it: it is reported and stays
+ * pending (visible as inbox_unrouted_oldest_seconds) while the rest proceed.
+ */
 export async function routePending(deps: RouterDeps, limit = 100): Promise<number> {
   const pending = await deps.db.query(
     `SELECT id FROM inbox_events WHERE routing_status = 'pending' ORDER BY received_at LIMIT $1`,
     [limit],
   );
-  for (const row of pending.rows) await routeEvent(deps, row.id);
-  return pending.rowCount ?? 0;
+  let routed = 0;
+  for (const row of pending.rows) {
+    try {
+      await routeEvent(deps, row.id);
+      routed += 1;
+    } catch (err) {
+      deps.onError?.(err, row.id);
+    }
+  }
+  return routed;
 }
 
 interface Decision {
@@ -93,9 +107,10 @@ async function routeComment(c: PoolClient, ev: any, conv: any, now: Date): Promi
     });
   }
 
-  const conn = (await c.query(`SELECT status FROM social_connections WHERE id = $1`, [ev.connection_id])).rows[0];
+  const conn = (await c.query(`SELECT status, sends_paused FROM social_connections WHERE id = $1`, [ev.connection_id])).rows[0];
   const suppression =
     conn.status !== 'active' ? Reason.CONNECTION_INACTIVE
+    : conn.sends_paused ? Reason.SENDS_PAUSED
     : conv.opted_out ? Reason.OPTED_OUT
     : conv.human_takeover ? Reason.HUMAN_TAKEOVER
     : conv.owner_run_id ? Reason.CONVERSATION_BUSY

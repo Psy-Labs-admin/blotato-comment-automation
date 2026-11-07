@@ -12,6 +12,7 @@ import { startFakeInstagram } from './fakes/fake-instagram';
 import { routePending } from './ingest/router';
 import { createMetrics } from './observability/metrics';
 import { integrationHandlers, onDeadLetter } from './relay/integrations';
+import { reconcileOrphans } from './relay/orphans';
 import { OutboxRelay } from './relay/relay';
 import { createPool } from './storage/db';
 import { migrate } from './storage/migrate';
@@ -71,7 +72,12 @@ async function main() {
     const onError = (err: unknown) => console.error('relay error', err);
     // Separate relays so a slow CRM never delays workflow starts/signals.
     relays.push(
-      new OutboxRelay({ db, kinds: ['workflow.start', 'workflow.signal'], handlers: temporalHandlers({ client, db, taskQueue: cfg.taskQueue }), onDead: onDeadLetter, onError }),
+      // Temporal commands are never dead-lettered: a Temporal outage only delays them
+      // (visible as outbox_oldest_pending_seconds), it must not strand runs.
+      new OutboxRelay({
+        db, kinds: ['workflow.start', 'workflow.signal'], handlers: temporalHandlers({ client, db, taskQueue: cfg.taskQueue }),
+        maxAttempts: Number.POSITIVE_INFINITY, onDead: onDeadLetter, onError,
+      }),
       new OutboxRelay({
         db, kinds: ['crm.lead_captured', 'alert.notify'], onDead: onDeadLetter, onError,
         handlers: integrationHandlers({ db, crm: new HttpCrmClient(cfg.crmBaseUrl), notifier }),
@@ -79,9 +85,15 @@ async function main() {
     );
     relays.forEach((r) => r.start());
     // Sweeper: routes inbox events whose inline routing never ran (crash between ack and route).
-    const sweeper = setInterval(() => routePending({ db, clock: systemClock, onOutbox: poke }).catch(onError), 2_000);
+    const sweeper = setInterval(
+      () => routePending({ db, clock: systemClock, onOutbox: poke, onError: (err, id) => console.error('routing failed', id, err) }).catch(onError),
+      2_000,
+    );
+    // Orphans: unfinished runs whose workflow is gone are finalized visibly.
+    const orphans = setInterval(() => reconcileOrphans({ db, client, clock: systemClock }).catch(onError), 60_000);
     stops.push(async () => {
       clearInterval(sweeper);
+      clearInterval(orphans);
       await Promise.all(relays.map((r) => r.stop()));
       await connection.close();
     });

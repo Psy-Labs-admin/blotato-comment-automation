@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Pool } from 'pg';
 import { z } from 'zod';
-import { releaseIfSettled } from '../activities/runs';
+import { onIntentSettled } from '../activities/runs';
 import { resolveIncident, settleUnknownIncident } from '../alerts/incidents';
 import type { Clock } from '../domain/clock';
 import { DefinitionError } from '../domain/definition';
@@ -290,11 +290,20 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     if (!body.success) return reply.code(400).send({ error: 'resolution (accepted|not_sent) and note are required' });
 
     const result = await withTx(db, async (c) => {
-      const intent = (await c.query(`SELECT * FROM message_intents WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, [id.data, tenantId])).rows[0];
-      if (!intent) return 404;
+      // Lock order as everywhere else: conversation, then intent. Taking the conversation lock first
+      // serialises this decision with a concurrent finalizeRun, so the run is either still active
+      // (we wake it) or already finished (we release its conversation) — never neither.
+      const head = (await c.query(`SELECT conversation_id FROM message_intents WHERE id = $1 AND tenant_id = $2`, [id.data, tenantId])).rows[0];
+      if (!head) return 404;
+      await c.query(`SELECT 1 FROM conversations WHERE id = $1 FOR UPDATE`, [head.conversation_id]);
+      const intent = (await c.query(`SELECT * FROM message_intents WHERE id = $1 FOR UPDATE`, [id.data])).rows[0];
       if (intent.status !== 'unknown') return 409;
+      const run = (await c.query(`SELECT finished_at FROM automation_runs WHERE id = $1`, [intent.run_id])).rows[0];
       if (body.data.resolution === 'accepted') {
         await c.query(`UPDATE message_intents SET status = 'accepted', status_reason = NULL, resolved_by = 'operator', updated_at = now() WHERE id = $1`, [intent.id]);
+      } else if (run.finished_at) {
+        // Not sent, and the run is over: nothing will retry it.
+        await c.query(`UPDATE message_intents SET status = 'cancelled', status_reason = 'operator_not_sent', resolved_by = 'operator', updated_at = now() WHERE id = $1`, [intent.id]);
       } else {
         // Operator confirmed it never reached the person: the same intent may be attempted again.
         await c.query(
@@ -306,18 +315,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
         tenantId, runId: intent.run_id, conversationId: intent.conversation_id, intentId: intent.id,
         type: 'send.resolved', reason: 'operator', data: { resolution: body.data.resolution, note: body.data.note },
       });
-      const run = (await c.query(`SELECT finished_at FROM automation_runs WHERE id = $1`, [intent.run_id])).rows[0];
-      if (run.finished_at) {
-        if (body.data.resolution === 'not_sent') {
-          await c.query(`UPDATE message_intents SET status = 'cancelled', status_reason = 'run_finished' WHERE id = $1`, [intent.id]);
-        }
-        await releaseIfSettled(c, intent.run_id, clock.now());
-      } else {
-        await enqueueOutbox(c, {
-          tenantId, kind: 'workflow.signal', idempotencyKey: `resolved:${intent.id}:${intent.attempt_count}`,
-          payload: { runId: intent.run_id, signal: 'intentResolved', args: [{ intentId: intent.id }] },
-        });
-      }
+      await onIntentSettled(c, { intentId: intent.id, runId: intent.run_id, tenantId }, clock.now(), `operator:${intent.attempt_count}`);
       await settleUnknownIncident(c, { tenantId, connectionId: intent.connection_id });
       return 200;
     });

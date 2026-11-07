@@ -4,22 +4,26 @@ import type { SendOutcome } from '../adapters/instagram';
 import { raiseIncident, settleUnknownIncident } from '../alerts/incidents';
 import type { AutomationDefinition } from '../domain/definition';
 import { Reason } from '../domain/reasons';
-import { resolveCapabilities, type SendKind, type SendStepResult } from '../domain/types';
+import { parseCapabilities, type SendKind, type SendStepResult } from '../domain/types';
 import { checkSendPolicy } from '../policy/gate';
 import { audit } from '../storage/audit';
 import { withTx } from '../storage/db';
 import type { ActivityDeps } from './deps';
+import { onIntentSettled } from './runs';
 
 /**
  * The external-send protocol (see docs/decisions/002-external-send-guarantees.md):
  *
  *   Tx1 (conversation lock): find-or-create the intent; short-circuit on any recorded outcome;
  *        an `in_flight` intent means a previous attempt never recorded its result -> `unknown`;
- *        policy gate; reserve the attempt (pending -> in_flight) and, for a prompt, fix the wait
- *        boundary + deadline. COMMIT.
+ *        deadline + policy gate; reserve the attempt (pending -> in_flight) and, for a prompt,
+ *        fix the wait boundary + deadline. COMMIT.
  *   HTTP (no locks held, no retries inside the adapter).
- *   Tx2: record the attempt; update the intent only if this attempt still owns it (fencing).
+ *   Tx2 (conversation lock, then intent): record the attempt; update the intent only if this
+ *        attempt still owns it (fencing). A late acceptance of a fenced attempt is evidence: it
+ *        settles the intent and wakes the run (or releases the conversation of a finished run).
  *
+ * Lock order everywhere: conversation -> intent -> incident.
  * Every entry - first try, Temporal retry, retry after a worker died - goes through Tx1, so
  * "Instagram accepted -> worker died -> activity retried" can never produce a blind second send.
  */
@@ -28,13 +32,17 @@ export async function executeSend(
   i: { runId: string; stepId: string; actionNo: number },
 ): Promise<SendStepResult> {
   const reserved = await withTx(deps.db, (c) => reserve(c, deps, i));
-  if (reserved.done) return reserved.result;
+  if (reserved.done) {
+    if (reserved.poke) deps.onOutbox?.();
+    return reserved.result;
+  }
 
   const { intent, attemptId, request } = reserved;
   const outcome = await deps.platform.send(request);
   deps.hooks?.afterProviderCall?.(intent.id, i);
 
   const result = await withTx(deps.db, (c) => record(c, deps, intent, attemptId, outcome));
+  deps.onOutbox?.();
   deps.hooks?.afterResultCommit?.(intent.id, i);
   return result;
 }
@@ -59,7 +67,7 @@ interface IntentRow {
 }
 
 type Reservation =
-  | { done: true; result: SendStepResult }
+  | { done: true; result: SendStepResult; poke?: boolean }
   | { done: false; intent: IntentRow; attemptId: string; request: Parameters<ActivityDeps['platform']['send']>[0] };
 
 async function reserve(c: PoolClient, deps: ActivityDeps, i: { runId: string; stepId: string; actionNo: number }): Promise<Reservation> {
@@ -80,7 +88,8 @@ async function reserve(c: PoolClient, deps: ActivityDeps, i: { runId: string; st
   const conv = (await c.query(`SELECT * FROM conversations WHERE id = $1 FOR UPDATE`, [ctx.conversation_id])).rows[0];
 
   // Find or create the logical intent. Its content comes from the run's pinned definition version.
-  const spec = intentSpec(ctx.definition as AutomationDefinition, i.stepId, i.actionNo, { commentId: ctx.comment_id, participantId: conv.participant_id });
+  const def = ctx.definition as AutomationDefinition;
+  const spec = intentSpec(def, i.stepId, i.actionNo, { commentId: ctx.comment_id, participantId: conv.participant_id });
   const fingerprint = createHash('sha256').update(JSON.stringify([spec.kind, spec.target, spec.body])).digest('hex');
   await c.query(
     `INSERT INTO message_intents (tenant_id, run_id, step_id, action_no, connection_id, conversation_id, kind, target, body, fingerprint)
@@ -105,13 +114,8 @@ async function reserve(c: PoolClient, deps: ActivityDeps, i: { runId: string; st
     case 'in_flight': {
       // A previous attempt reserved the send and never recorded a result: the worker died, timed
       // out, or is still waiting on the network. The message may have been delivered.
-      await c.query(`UPDATE message_intents SET status = 'unknown', status_reason = $2, updated_at = now() WHERE id = $1`, [
-        intent.id,
-        Reason.ATTEMPT_OUTCOME_LOST,
-      ]);
-      await audit(c, { ...base, type: 'send.unknown', reason: Reason.ATTEMPT_OUTCOME_LOST, data: { stepId: i.stepId, actionNo: i.actionNo } });
-      await raiseIncident(c, { tenantId: intent.tenant_id, connectionId: intent.connection_id, errorClass: 'send_outcome_unknown', runId: i.runId });
-      return { done: true, result: { status: 'unknown', intentId: intent.id, reason: Reason.ATTEMPT_OUTCOME_LOST } };
+      await markUnknown(c, intent, Reason.ATTEMPT_OUTCOME_LOST);
+      return { done: true, poke: true, result: { status: 'unknown', intentId: intent.id, reason: Reason.ATTEMPT_OUTCOME_LOST } };
     }
   }
 
@@ -123,12 +127,27 @@ async function reserve(c: PoolClient, deps: ActivityDeps, i: { runId: string; st
   }
 
   const now = deps.clock.now();
+  const block = async (outcome: 'blocked' | 'cancelled', reason: string, data: Record<string, unknown> = {}): Promise<Reservation> => {
+    await c.query(`UPDATE message_intents SET status = $2, status_reason = $3, updated_at = now() WHERE id = $1`, [intent.id, outcome, reason]);
+    await audit(c, { ...base, type: `send.${outcome}`, reason, data: { stepId: i.stepId, ...data } });
+    return { done: true, result: { status: outcome, intentId: intent.id, reason } };
+  };
+
+  // A question or clarification after its wait's deadline is pointless (and confusing): never send it.
+  const waitDeadline = (
+    await c.query(
+      `SELECT deadline FROM input_waits WHERE run_id = $1 AND (id = $2 OR (step_id = $3 AND $4 > 1)) AND deadline IS NOT NULL LIMIT 1`,
+      [i.runId, waitId, i.stepId, i.actionNo],
+    )
+  ).rows[0]?.deadline as Date | undefined;
+  if (waitDeadline && now.getTime() >= waitDeadline.getTime()) return block('blocked', Reason.DEADLINE_PASSED);
+
   const gate = await checkSendPolicy(c, {
     runId: i.runId,
     connectionId: intent.connection_id,
     conversationId: conv.id,
     kind: intent.kind,
-    capabilities: resolveCapabilities(ctx.capabilities),
+    capabilities: parseCapabilities(ctx.capabilities),
     connectionStatus: ctx.connection_status,
     sendsPaused: ctx.sends_paused,
     conversation: conv,
@@ -141,9 +160,7 @@ async function reserve(c: PoolClient, deps: ActivityDeps, i: { runId: string; st
       await audit(c, { ...base, type: 'send.deferred', reason: gate.reason, data: { retryAfterMs: gate.retryAfterMs } });
       return { done: true, result: { status: 'deferred', intentId: intent.id, retryAfterMs: gate.retryAfterMs ?? 1000, reason: gate.reason } };
     }
-    await c.query(`UPDATE message_intents SET status = $2, status_reason = $3, updated_at = now() WHERE id = $1`, [intent.id, gate.outcome, gate.reason]);
-    await audit(c, { ...base, type: `send.${gate.outcome}`, reason: gate.reason, data: { stepId: i.stepId } });
-    return { done: true, result: { status: gate.outcome, intentId: intent.id, reason: gate.reason } };
+    return block(gate.outcome, gate.reason, gate.data);
   }
 
   const attemptNo = intent.attempt_count + 1;
@@ -184,31 +201,50 @@ async function reserve(c: PoolClient, deps: ActivityDeps, i: { runId: string; st
   };
 }
 
-async function record(c: PoolClient, deps: ActivityDeps, intent: IntentRow, attemptId: string, out: SendOutcome): Promise<SendStepResult> {
+/** Declares an attempt's outcome lost: held conversation, incident, no automatic resend. */
+export async function markUnknown(c: PoolClient, intent: { id: string; tenant_id: string; run_id: string; conversation_id: string; connection_id: string; step_id: string; action_no: number }, reason: string) {
+  await c.query(`UPDATE message_intents SET status = 'unknown', status_reason = $2, updated_at = now() WHERE id = $1`, [intent.id, reason]);
+  await audit(c, {
+    tenantId: intent.tenant_id, runId: intent.run_id, conversationId: intent.conversation_id, intentId: intent.id,
+    type: 'send.unknown', reason, data: { stepId: intent.step_id, actionNo: intent.action_no },
+  });
+  await raiseIncident(c, { tenantId: intent.tenant_id, connectionId: intent.connection_id, errorClass: 'send_outcome_unknown', runId: intent.run_id });
+}
+
+async function record(c: PoolClient, deps: ActivityDeps, reserved: IntentRow, attemptId: string, out: SendOutcome): Promise<SendStepResult> {
   const now = deps.clock.now();
+  // Same lock order as Tx1 (conversation, then intent): no deadlock with a concurrent re-entry.
+  await c.query(`SELECT 1 FROM conversations WHERE id = $1 FOR UPDATE`, [reserved.conversation_id]);
+  const intent: IntentRow = (await c.query(`SELECT * FROM message_intents WHERE id = $1 FOR UPDATE`, [reserved.id])).rows[0];
   await c.query(
     `UPDATE message_attempts SET finished_at = $2, outcome = $3, http_status = $4, provider_code = $5, provider_message_id = $6 WHERE id = $1`,
     [attemptId, now, out.status, out.httpStatus ?? null, 'code' in out ? out.code : null, out.status === 'accepted' ? out.providerMessageId : null],
   );
   const base = { tenantId: intent.tenant_id, runId: intent.run_id, conversationId: intent.conversation_id, intentId: intent.id };
 
-  const owned = await c.query(`SELECT status FROM message_intents WHERE id = $1 AND current_attempt_id = $2 FOR UPDATE`, [intent.id, attemptId]);
-  if (owned.rows[0]?.status !== 'in_flight') {
-    // Fenced: another entry already declared this attempt's outcome lost. A provider acceptance of
-    // this very attempt is still authoritative evidence and resolves the uncertainty.
+  const ownsIntent = intent.status === 'in_flight' && intent.current_attempt_id === attemptId;
+  if (!ownsIntent) {
+    // Fenced: another entry already declared this attempt's outcome lost, or an operator decided
+    // it was not sent. A provider acceptance of this very attempt is authoritative evidence.
     await c.query(`UPDATE message_attempts SET recorded_late = true WHERE id = $1`, [attemptId]);
-    if (out.status === 'accepted' && owned.rows[0]?.status === 'unknown') {
+    if (out.status === 'accepted' && (intent.status === 'unknown' || intent.status === 'pending')) {
+      const contradicted = intent.status === 'pending';
       await c.query(
-        `UPDATE message_intents SET status = 'accepted', status_reason = NULL, provider_message_id = $2, resolved_by = 'late_result', updated_at = now() WHERE id = $1`,
-        [intent.id, out.providerMessageId],
+        `UPDATE message_intents SET status = 'accepted', status_reason = NULL, current_attempt_id = $3, provider_message_id = $2,
+                resolved_by = 'late_result', updated_at = now() WHERE id = $1`,
+        [intent.id, out.providerMessageId, attemptId],
       );
-      await audit(c, { ...base, type: 'send.resolved', reason: 'late_result', data: { providerMessageId: out.providerMessageId } });
+      await audit(c, {
+        ...base, type: 'send.resolved', reason: 'late_result',
+        data: { providerMessageId: out.providerMessageId, contradictsOperatorNotSent: contradicted || undefined },
+      });
       await settleUnknownIncident(c, { tenantId: intent.tenant_id, connectionId: intent.connection_id });
+      await onIntentSettled(c, { intentId: intent.id, runId: intent.run_id, tenantId: intent.tenant_id }, now, 'late');
       return { status: 'accepted', intentId: intent.id, providerMessageId: out.providerMessageId };
     }
-    await audit(c, { ...base, type: 'send.late_result_ignored', data: { outcome: out.status } });
-    const current = (await c.query(`SELECT status, status_reason FROM message_intents WHERE id = $1`, [intent.id])).rows[0];
-    return { status: 'unknown', intentId: intent.id, reason: current.status_reason ?? Reason.ATTEMPT_OUTCOME_LOST };
+    await audit(c, { ...base, type: 'send.late_result_ignored', data: { outcome: out.status, intentStatus: intent.status } });
+    if (intent.status === 'accepted') return { status: 'accepted', intentId: intent.id, providerMessageId: intent.provider_message_id };
+    return { status: 'unknown', intentId: intent.id, reason: intent.status_reason ?? Reason.ATTEMPT_OUTCOME_LOST };
   }
 
   switch (out.status) {
@@ -226,7 +262,7 @@ async function record(c: PoolClient, deps: ActivityDeps, intent: IntentRow, atte
       await c.query(`UPDATE message_intents SET status = 'rejected', status_reason = $2, updated_at = now() WHERE id = $1`, [intent.id, reason]);
       await audit(c, { ...base, type: 'send.rejected', reason, data: { providerCode: out.code, httpStatus: out.httpStatus } });
       if (unauthorized) {
-        // Stop every automation on this account until it is reconnected.
+        // Stop every automation on this account until it is reconnected (in-flight runs defer).
         await c.query(
           `UPDATE social_connections SET status = 'unauthorized', sends_paused = true, sends_paused_reason = $2 WHERE id = $1`,
           [intent.connection_id, Reason.PROVIDER_UNAUTHORIZED],
@@ -245,18 +281,23 @@ async function record(c: PoolClient, deps: ActivityDeps, intent: IntentRow, atte
       await audit(c, { ...base, type: 'send.deferred', reason: Reason.PROVIDER_THROTTLED, data: { providerCode: out.code, retryAfterMs: out.retryAfterMs } });
       return { status: 'deferred', intentId: intent.id, retryAfterMs: out.retryAfterMs, reason: Reason.PROVIDER_THROTTLED };
 
-    case 'unknown':
-      await c.query(`UPDATE message_intents SET status = 'unknown', status_reason = $2, updated_at = now() WHERE id = $1`, [intent.id, Reason.PROVIDER_NO_CONFIRMATION]);
+    case 'unknown': {
+      await c.query(`UPDATE message_intents SET status = 'unknown', status_reason = $2, updated_at = now() WHERE id = $1`, [
+        intent.id,
+        Reason.PROVIDER_NO_CONFIRMATION,
+      ]);
       await audit(c, { ...base, type: 'send.unknown', reason: Reason.PROVIDER_NO_CONFIRMATION, data: { providerCode: out.code } });
       await raiseIncident(c, { tenantId: intent.tenant_id, connectionId: intent.connection_id, errorClass: 'send_outcome_unknown', runId: intent.run_id });
       return { status: 'unknown', intentId: intent.id, reason: Reason.PROVIDER_NO_CONFIRMATION };
+    }
   }
 }
 
 /**
  * Recovery for `unknown` intents: only authoritative evidence counts. A lookup by our client
- * reference (when the adapter contract supports it) or a prior operator decision. Matching text and
- * timestamps is not proof of identity, so absence of evidence leaves the intent unresolved.
+ * reference (when the adapter contract supports it), a late result, or an operator decision.
+ * Matching text and timestamps is not proof of identity, and a failing or empty lookup is not
+ * proof of non-delivery: both leave the intent unresolved.
  */
 export async function reconcileIntent(deps: ActivityDeps, i: { intentId: string }): Promise<{ status: 'accepted' | 'retry_allowed' | 'unresolved' }> {
   const row = (
@@ -271,21 +312,28 @@ export async function reconcileIntent(deps: ActivityDeps, i: { intentId: string 
   if (row.status === 'pending') return { status: 'retry_allowed' };
   if (row.status !== 'unknown') return { status: 'unresolved' };
 
-  const caps = resolveCapabilities(row.capabilities);
-  if (caps.reconciliation !== 'lookup_by_client_ref' || !deps.platform.lookupByClientRef) return { status: 'unresolved' };
-  const found = await deps.platform.lookupByClientRef(row.external_account_id, row.id);
+  const reconciliation = parseCapabilities(row.capabilities).reconciliation ?? 'none';
+  if (reconciliation !== 'lookup_by_client_ref' || !deps.platform.lookupByClientRef) return { status: 'unresolved' };
+  let found: Awaited<ReturnType<NonNullable<typeof deps.platform.lookupByClientRef>>>;
+  try {
+    found = await deps.platform.lookupByClientRef(row.external_account_id, row.id);
+  } catch {
+    return { status: 'unresolved' }; // provider outage: stay visible and retry on the next re-check
+  }
   if (!found.found) return { status: 'unresolved' };
+  const providerMessageId = found.providerMessageId;
 
   return withTx(deps.db, async (c) => {
+    await c.query(`SELECT 1 FROM conversations WHERE id = $1 FOR UPDATE`, [row.conversation_id]);
     const r = await c.query(
       `UPDATE message_intents SET status = 'accepted', status_reason = NULL, provider_message_id = $2, resolved_by = 'reconciliation', updated_at = now()
         WHERE id = $1 AND status = 'unknown'`,
-      [row.id, found.providerMessageId],
+      [row.id, providerMessageId],
     );
     if (r.rowCount) {
       await audit(c, {
         tenantId: row.tenant_id, runId: row.run_id, conversationId: row.conversation_id, intentId: row.id,
-        type: 'send.resolved', reason: 'reconciliation', data: { providerMessageId: found.providerMessageId },
+        type: 'send.resolved', reason: 'reconciliation', data: { providerMessageId },
       });
       await settleUnknownIncident(c, { tenantId: row.tenant_id, connectionId: row.connection_id });
     }

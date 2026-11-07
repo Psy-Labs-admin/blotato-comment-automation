@@ -47,9 +47,10 @@ CREATE TABLE automation_versions (
   definition     jsonb NOT NULL,
   created_at     timestamptz NOT NULL DEFAULT now(),
   UNIQUE (automation_id, version),
+  UNIQUE (id, tenant_id),
   FOREIGN KEY (automation_id, tenant_id) REFERENCES automations(id, tenant_id)
 );
-ALTER TABLE automations ADD FOREIGN KEY (active_version_id) REFERENCES automation_versions(id);
+ALTER TABLE automations ADD FOREIGN KEY (active_version_id, tenant_id) REFERENCES automation_versions(id, tenant_id);
 
 -- One row per (connected account, participant). The row lock serialises everything that happens
 -- in one conversation: triggers, inbound DMs, prompt boundaries, consumption and expiry.
@@ -90,7 +91,9 @@ CREATE TABLE inbox_events (
   run_id              uuid,
   UNIQUE (connection_id, event_type, provider_event_key),
   UNIQUE (conversation_id, seq),
-  FOREIGN KEY (conversation_id, tenant_id) REFERENCES conversations(id, tenant_id)
+  UNIQUE (id, tenant_id),
+  FOREIGN KEY (conversation_id, tenant_id) REFERENCES conversations(id, tenant_id),
+  FOREIGN KEY (connection_id, tenant_id) REFERENCES social_connections(id, tenant_id)
 );
 CREATE INDEX inbox_pending_idx ON inbox_events (received_at) WHERE routing_status = 'pending';
 
@@ -99,9 +102,9 @@ CREATE TABLE automation_runs (
   id                uuid PRIMARY KEY,
   tenant_id         uuid NOT NULL,
   automation_id     uuid NOT NULL,
-  version_id        uuid NOT NULL REFERENCES automation_versions(id),
+  version_id        uuid NOT NULL,
   conversation_id   uuid NOT NULL,
-  trigger_event_id  uuid NOT NULL UNIQUE REFERENCES inbox_events(id),   -- one run per trigger event
+  trigger_event_id  uuid NOT NULL UNIQUE,             -- one run per trigger event
   workflow_id       text NOT NULL UNIQUE,
   status            text NOT NULL CHECK (status IN ('starting', 'running', 'waiting_input', 'blocked_unknown',
                                                     'completed', 'expired', 'cancelled', 'failed')),
@@ -112,10 +115,12 @@ CREATE TABLE automation_runs (
   finished_at       timestamptz,
   UNIQUE (id, tenant_id),
   FOREIGN KEY (conversation_id, tenant_id) REFERENCES conversations(id, tenant_id),
-  FOREIGN KEY (automation_id, tenant_id) REFERENCES automations(id, tenant_id)
+  FOREIGN KEY (automation_id, tenant_id) REFERENCES automations(id, tenant_id),
+  FOREIGN KEY (version_id, tenant_id) REFERENCES automation_versions(id, tenant_id),
+  FOREIGN KEY (trigger_event_id, tenant_id) REFERENCES inbox_events(id, tenant_id)
 );
 CREATE INDEX runs_status_idx ON automation_runs (tenant_id, status);
-ALTER TABLE conversations ADD FOREIGN KEY (owner_run_id) REFERENCES automation_runs(id);
+ALTER TABLE conversations ADD FOREIGN KEY (owner_run_id, tenant_id) REFERENCES automation_runs(id, tenant_id);
 
 -- Authoritative control plane for a run (checked by every send), not a projection of workflow state.
 CREATE TABLE run_controls (
@@ -129,7 +134,7 @@ CREATE TABLE run_controls (
 CREATE TABLE input_waits (
   id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id            uuid NOT NULL,
-  run_id               uuid NOT NULL REFERENCES automation_runs(id),
+  run_id               uuid NOT NULL,
   step_id              text NOT NULL,
   prompt_step_id       text NOT NULL,
   conversation_id      uuid NOT NULL,
@@ -140,26 +145,32 @@ CREATE TABLE input_waits (
   boundary_seq         bigint,           -- inbound messages with seq <= boundary predate the question
   prompt_started_at    timestamptz,      -- fixed when the first prompt attempt is reserved
   deadline             timestamptz,      -- prompt_started_at + timeout; never moves
-  consumed_event_id    uuid REFERENCES inbox_events(id),
+  consumed_event_id    uuid,
   lead_id              uuid,
   closed_at            timestamptz,
-  UNIQUE (run_id, step_id)
+  UNIQUE (run_id, step_id),
+  UNIQUE (id, tenant_id),
+  FOREIGN KEY (run_id, tenant_id) REFERENCES automation_runs(id, tenant_id),
+  FOREIGN KEY (conversation_id, tenant_id) REFERENCES conversations(id, tenant_id),
+  FOREIGN KEY (consumed_event_id, tenant_id) REFERENCES inbox_events(id, tenant_id)
 );
 
 -- Each inbound event is evaluated by at most one wait, exactly once (including invalid answers).
 CREATE TABLE input_consumptions (
-  inbox_event_id  uuid PRIMARY KEY REFERENCES inbox_events(id),
-  wait_id         uuid NOT NULL REFERENCES input_waits(id),
+  inbox_event_id  uuid PRIMARY KEY,
+  wait_id         uuid NOT NULL,
   tenant_id       uuid NOT NULL,
   result          text NOT NULL CHECK (result IN ('valid', 'invalid', 'ambiguous')),
-  created_at      timestamptz NOT NULL DEFAULT now()
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (inbox_event_id, tenant_id) REFERENCES inbox_events(id, tenant_id),
+  FOREIGN KEY (wait_id, tenant_id) REFERENCES input_waits(id, tenant_id)
 );
 
 -- Send ledger: one row per logical outbound action. Retries are attempts of the same intent.
 CREATE TABLE message_intents (
   id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id            uuid NOT NULL,
-  run_id               uuid NOT NULL REFERENCES automation_runs(id),
+  run_id               uuid NOT NULL,
   step_id              text NOT NULL,
   action_no            int NOT NULL,           -- 1 = the step's message, 2.. = clarifications
   connection_id        uuid NOT NULL,
@@ -168,7 +179,7 @@ CREATE TABLE message_intents (
   target               jsonb NOT NULL,         -- {"commentId": ...} or {"recipientId": ...}
   body                 text NOT NULL,
   fingerprint          text NOT NULL,          -- immutable hash of (kind, target, body)
-  wait_id              uuid REFERENCES input_waits(id),
+  wait_id              uuid,
   status               text NOT NULL DEFAULT 'pending'
                        CHECK (status IN ('pending', 'in_flight', 'accepted', 'rejected', 'unknown', 'blocked', 'cancelled')),
   status_reason        text,
@@ -178,7 +189,11 @@ CREATE TABLE message_intents (
   resolved_by          text,                   -- provider | late_result | reconciliation | operator
   created_at           timestamptz NOT NULL DEFAULT now(),
   updated_at           timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (run_id, step_id, action_no)
+  UNIQUE (run_id, step_id, action_no),
+  FOREIGN KEY (run_id, tenant_id) REFERENCES automation_runs(id, tenant_id),
+  FOREIGN KEY (conversation_id, tenant_id) REFERENCES conversations(id, tenant_id),
+  FOREIGN KEY (connection_id, tenant_id) REFERENCES social_connections(id, tenant_id),
+  FOREIGN KEY (wait_id, tenant_id) REFERENCES input_waits(id, tenant_id)
 );
 CREATE INDEX intents_unresolved_idx ON message_intents (tenant_id, status) WHERE status IN ('in_flight', 'unknown');
 
@@ -227,14 +242,17 @@ CREATE TABLE leads (
   connection_id    uuid NOT NULL,
   conversation_id  uuid NOT NULL,
   participant_id   text NOT NULL,
-  run_id           uuid NOT NULL UNIQUE REFERENCES automation_runs(id),
-  source_event_id  uuid NOT NULL REFERENCES inbox_events(id),
+  run_id           uuid NOT NULL UNIQUE,
+  source_event_id  uuid NOT NULL,
   email            text NOT NULL,
   email_status     text NOT NULL DEFAULT 'format_valid_unverified',
   crm_status       text NOT NULL DEFAULT 'pending' CHECK (crm_status IN ('pending', 'synced', 'failed')),
   crm_synced_at    timestamptz,
   created_at       timestamptz NOT NULL DEFAULT now(),
-  FOREIGN KEY (conversation_id, tenant_id) REFERENCES conversations(id, tenant_id)
+  FOREIGN KEY (conversation_id, tenant_id) REFERENCES conversations(id, tenant_id),
+  FOREIGN KEY (connection_id, tenant_id) REFERENCES social_connections(id, tenant_id),
+  FOREIGN KEY (run_id, tenant_id) REFERENCES automation_runs(id, tenant_id),
+  FOREIGN KEY (source_event_id, tenant_id) REFERENCES inbox_events(id, tenant_id)
 );
 
 -- Grouped operational incidents (what gets sent to Telegram), not one alert per event.
@@ -250,7 +268,8 @@ CREATE TABLE incidents (
   last_seen_at      timestamptz NOT NULL DEFAULT now(),
   last_notified_at  timestamptz,
   notify_count      int NOT NULL DEFAULT 0,
-  resolved_at       timestamptz
+  resolved_at       timestamptz,
+  FOREIGN KEY (connection_id, tenant_id) REFERENCES social_connections(id, tenant_id)
 );
 CREATE UNIQUE INDEX incidents_open_uq ON incidents
   (tenant_id, coalesce(connection_id, '00000000-0000-0000-0000-000000000000'::uuid), error_class)

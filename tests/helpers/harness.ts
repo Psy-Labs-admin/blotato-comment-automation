@@ -29,6 +29,8 @@ export interface HarnessOptions {
   hooks?: CrashHooks;
   /** Instagram adapter timeout (how long before a slow response counts as "unknown"). */
   sendTimeoutMs?: number;
+  /** How often a waiting/blocked workflow re-checks Postgres without a signal (production: minutes). */
+  recheckMs?: number;
 }
 
 const TERMINAL = new Set(['completed', 'expired', 'cancelled', 'failed']);
@@ -63,8 +65,8 @@ export async function createHarness(o: HarnessOptions = {}) {
     onOutbox: poke,
   };
   const temporalRelay = new OutboxRelay({
-    db, kinds: ['workflow.start', 'workflow.signal'], handlers: temporalHandlers({ client, db, taskQueue }),
-    pollMs: 50, backoff: () => 100, onDead: onDeadLetter,
+    db, kinds: ['workflow.start', 'workflow.signal'], handlers: temporalHandlers({ client, db, taskQueue, recheckMs: o.recheckMs ?? 400 }),
+    pollMs: 50, backoff: () => 100, maxAttempts: Number.POSITIVE_INFINITY, onDead: onDeadLetter,
   });
   const integrationRelay = new OutboxRelay({
     db, kinds: ['crm.lead_captured', 'alert.notify'],

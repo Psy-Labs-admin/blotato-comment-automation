@@ -146,7 +146,8 @@ describe('send ledger and policy gate', () => {
     expect(await executeSend(deps, { runId: r1, stepId: 'public_reply', actionNo: 1 })).toMatchObject({ status: 'rejected', reason: Reason.PROVIDER_UNAUTHORIZED });
     const conn = (await db.query(`SELECT status, sends_paused FROM social_connections WHERE id = $1`, [tn.connectionId])).rows[0];
     expect(conn).toEqual({ status: 'unauthorized', sends_paused: true });
-    expect(await executeSend(deps, { runId: r2, stepId: 'public_reply', actionNo: 1 })).toMatchObject({ status: 'blocked', reason: Reason.SENDS_PAUSED });
+    // Paused is a deferral, not a failure: in-flight conversations continue after reconnect (review finding).
+    expect(await executeSend(deps, { runId: r2, stepId: 'public_reply', actionNo: 1 })).toMatchObject({ status: 'deferred', reason: Reason.SENDS_PAUSED });
     expect(ig.sent()).toHaveLength(0);
   });
 
@@ -163,6 +164,50 @@ describe('send ledger and policy gate', () => {
     const row = await intent(concurrent.intentId);
     expect(row).toMatchObject({ status: 'accepted', resolved_by: 'late_result' });
     expect(ig.sent()).toHaveLength(1);
+  });
+
+  it('a late result for a run that is still active wakes its workflow (review finding)', async () => {
+    const { runId } = await startRun();
+    ig.pushFault({ mode: 'delay', delayMs: 300 });
+    const slow = new HttpInstagramAdapter(ig.url, { timeoutMs: 2_000 });
+    const inFlight = executeSend({ ...deps, platform: slow }, { runId, stepId: 'public_reply', actionNo: 1 });
+    await new Promise((r) => setTimeout(r, 100));
+    const concurrent = await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 });
+    await inFlight;
+    const signal = await db.query(
+      `SELECT 1 FROM outbox WHERE kind = 'workflow.signal' AND payload->>'signal' = 'intentResolved' AND payload->'args'->0->>'intentId' = $1`,
+      [concurrent.intentId],
+    );
+    expect(signal.rowCount).toBe(1);
+  });
+
+  it('operator said "not sent" but the late acceptance arrives: no second send (review finding)', async () => {
+    const { runId } = await startRun();
+    ig.pushFault({ mode: 'delay', delayMs: 300 });
+    const slow = new HttpInstagramAdapter(ig.url, { timeoutMs: 2_000 });
+    const inFlight = executeSend({ ...deps, platform: slow }, { runId, stepId: 'public_reply', actionNo: 1 });
+    await new Promise((r) => setTimeout(r, 100));
+    const concurrent = await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 });
+    await db.query(`UPDATE message_intents SET status = 'pending', current_attempt_id = NULL, resolved_by = 'operator' WHERE id = $1`, [concurrent.intentId]);
+    await inFlight;
+    expect(await intent(concurrent.intentId)).toMatchObject({ status: 'accepted', resolved_by: 'late_result' });
+    expect(await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 })).toMatchObject({ status: 'accepted' });
+    expect(ig.sent()).toHaveLength(1);
+  });
+
+  it('an account whose adapter contract lacks a capability the send needs does not send (review finding)', async () => {
+    const { runId, tn } = await startRun();
+    await db.query(`UPDATE social_connections SET capabilities = '{}' WHERE id = $1`, [tn.connectionId]);
+    expect(await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 })).toMatchObject({ status: 'blocked', reason: Reason.CAPABILITY_UNKNOWN });
+    expect(ig.sent()).toHaveLength(0);
+  });
+
+  it('a failing reconciliation lookup leaves the send unresolved instead of failing the run (review finding)', async () => {
+    const { runId } = await startRun({ capabilities: { reconciliation: 'lookup_by_client_ref' } });
+    ig.pushFault({ mode: 'accept_then_drop' });
+    const r = await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 });
+    const broken = { ...deps, platform: { send: deps.platform.send.bind(deps.platform), lookupByClientRef: async () => { throw new Error('provider down'); } } };
+    expect(await reconcileIntent(broken, { intentId: r.intentId })).toEqual({ status: 'unresolved' });
   });
 
   it('reconciliation by client reference resolves an unknown send when the adapter supports it', async () => {
