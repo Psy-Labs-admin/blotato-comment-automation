@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import type { Pool } from 'pg';
 import { z } from 'zod';
 import { releaseIfSettled } from '../activities/runs';
-import { resolveIncident } from '../alerts/incidents';
+import { resolveIncident, settleUnknownIncident } from '../alerts/incidents';
 import type { Clock } from '../domain/clock';
 import { DefinitionError } from '../domain/definition';
 import { Reason } from '../domain/reasons';
@@ -297,8 +297,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
           payload: { runId: intent.run_id, signal: 'intentResolved', args: [{ intentId: intent.id }] },
         });
       }
-      const left = (await c.query(`SELECT count(*)::int AS n FROM message_intents WHERE connection_id = $1 AND status = 'unknown'`, [intent.connection_id])).rows[0].n;
-      if (left === 0) await resolveIncident(c, { tenantId, connectionId: intent.connection_id, errorClass: 'send_outcome_unknown' });
+      await settleUnknownIncident(c, { tenantId, connectionId: intent.connection_id });
       return 200;
     });
     deps.onOutbox?.();

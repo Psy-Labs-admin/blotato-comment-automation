@@ -43,6 +43,14 @@ export async function raiseIncident(
   });
 }
 
+/** Closes the "unknown send" incident of an account once none of its sends is unknown any more. */
+export async function settleUnknownIncident(c: PoolClient, i: { tenantId: string; connectionId: string }): Promise<void> {
+  const left = (
+    await c.query(`SELECT count(*)::int AS n FROM message_intents WHERE connection_id = $1 AND status = 'unknown'`, [i.connectionId])
+  ).rows[0].n;
+  if (left === 0) await resolveIncident(c, { ...i, errorClass: 'send_outcome_unknown' });
+}
+
 export async function resolveIncident(
   c: PoolClient,
   i: { tenantId: string; connectionId?: string | null; errorClass: IncidentClass },

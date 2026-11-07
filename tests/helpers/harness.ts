@@ -21,6 +21,7 @@ import { temporalHandlers } from '../../src/temporal/handlers';
 import { integrationHandlers, onDeadLetter } from '../../src/relay/integrations';
 import { startWorker, type RunningWorker } from '../../src/temporal/worker';
 import type { ActivityDeps, CrashHooks } from '../../src/activities/deps';
+import { buildServer } from '../../src/api/server';
 
 export interface HarnessOptions {
   capabilities?: Partial<Capabilities>;
@@ -78,6 +79,7 @@ export async function createHarness(o: HarnessOptions = {}) {
   const tenant = await seedTenant(db, { capabilities: o.capabilities });
   const automation = await createAutomation(db, tenant, o.definition ?? pricingWith({ timeout: '30s' }));
   const routerDeps = { db, clock: systemClock, onOutbox: poke };
+  const api = buildServer({ db, clock: systemClock, onOutbox: poke, logger: false });
 
   async function deliver(raw: unknown) {
     const res = await ingestEvent(routerDeps, raw);
@@ -86,7 +88,16 @@ export async function createHarness(o: HarnessOptions = {}) {
   }
 
   const h = {
-    db, ig, crm, alerts, client, tenant, automation, taskQueue, hooks, deps, temporalRelay, integrationRelay,
+    db, ig, crm, alerts, client, tenant, automation, taskQueue, hooks, deps, temporalRelay, integrationRelay, api,
+
+    /** Calls the management API as this tenant. */
+    request: async (method: 'GET' | 'POST', url: string, payload?: unknown) => {
+      const res = await api.inject({ method, url, payload: payload as any, headers: { 'x-tenant-id': tenant.tenantId } });
+      return { status: res.statusCode, body: res.body ? res.json() : undefined };
+    },
+    /** Messages the fake Instagram accepted that belong to this participant's conversation. */
+    messagesFor: (participant: string, commentId?: string) =>
+      ig.sent().filter((m) => m.recipientId === participant || (commentId !== undefined && m.commentId === commentId)),
 
     /** A comment webhook (inline routing, like the API). Returns the routing decision. */
     comment: (from: string, extra: Partial<Parameters<typeof commentEvent>[0]> = {}) =>
@@ -133,6 +144,7 @@ export async function createHarness(o: HarnessOptions = {}) {
       worker = await startWorker({ deps, connection: native, taskQueue });
     },
     async close() {
+      await api.close();
       await temporalRelay.stop();
       await integrationRelay.stop();
       await worker?.shutdown();

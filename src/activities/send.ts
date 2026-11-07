@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { PoolClient } from 'pg';
 import type { SendOutcome } from '../adapters/instagram';
-import { raiseIncident } from '../alerts/incidents';
+import { raiseIncident, settleUnknownIncident } from '../alerts/incidents';
 import type { AutomationDefinition } from '../domain/definition';
 import { Reason } from '../domain/reasons';
 import { resolveCapabilities, type SendKind, type SendStepResult } from '../domain/types';
@@ -203,6 +203,7 @@ async function record(c: PoolClient, deps: ActivityDeps, intent: IntentRow, atte
         [intent.id, out.providerMessageId],
       );
       await audit(c, { ...base, type: 'send.resolved', reason: 'late_result', data: { providerMessageId: out.providerMessageId } });
+      await settleUnknownIncident(c, { tenantId: intent.tenant_id, connectionId: intent.connection_id });
       return { status: 'accepted', intentId: intent.id, providerMessageId: out.providerMessageId };
     }
     await audit(c, { ...base, type: 'send.late_result_ignored', data: { outcome: out.status } });
@@ -286,6 +287,7 @@ export async function reconcileIntent(deps: ActivityDeps, i: { intentId: string 
         tenantId: row.tenant_id, runId: row.run_id, conversationId: row.conversation_id, intentId: row.id,
         type: 'send.resolved', reason: 'reconciliation', data: { providerMessageId: found.providerMessageId },
       });
+      await settleUnknownIncident(c, { tenantId: row.tenant_id, connectionId: row.connection_id });
     }
     return { status: 'accepted' as const };
   });
