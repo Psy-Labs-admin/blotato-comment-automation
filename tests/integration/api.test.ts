@@ -65,6 +65,16 @@ describe('HTTP API', () => {
     expect((await webhook({ hello: 'world' })).statusCode).toBe(400);
   });
 
+  it('explains what happened to a webhook event (routing outcome and run), scoped to the tenant', async () => {
+    const res = await webhook(commentEvent({ accountId: tn.accountId, from: 'event_lookup' }));
+    const eventId = res.json().eventId;
+    const ev = await app.inject({ method: 'GET', url: `/events/${eventId}`, headers: as(tn.tenantId) });
+    expect(ev.statusCode).toBe(200);
+    expect(ev.json()).toMatchObject({ eventType: 'comment.created', routingOutcome: 'started' });
+    expect(ev.json().runId).toMatch(/[0-9a-f-]{36}/);
+    expect((await app.inject({ method: 'GET', url: `/events/${eventId}`, headers: as(other.tenantId) })).statusCode).toBe(404);
+  });
+
   it('cancel writes the control and the workflow command atomically and answers "requested"', async () => {
     await webhook(commentEvent({ accountId: tn.accountId, from: 'to_cancel' }));
     const run = (await db.query(`SELECT r.id FROM automation_runs r JOIN conversations c ON c.id = r.conversation_id WHERE c.participant_id = 'to_cancel'`)).rows[0];
@@ -117,8 +127,9 @@ describe('HTTP API', () => {
     const res = await app.inject({ method: 'GET', url: '/funnel', headers: as(tn.tenantId) });
     expect(res.statusCode).toBe(200);
     const f = res.json();
-    expect(f.matchedComments).toBe(3);
-    expect(f.runsStarted).toBe(2);
+    // api_user, event_lookup and to_cancel started runs; the second to_cancel comment hit the cooldown.
+    expect(f.matchedComments).toBe(4);
+    expect(f.runsStarted).toBe(3);
     expect(f.suppressed).toMatchObject({ cooldown: 1 });
     expect(f).toHaveProperty('promptsAccepted');
     expect(f).toHaveProperty('emailsCaptured');

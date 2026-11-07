@@ -4,3 +4,4 @@ dist/
 .superpowers/
 coverage/
 *.log
+.demo.json

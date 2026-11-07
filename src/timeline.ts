@@ -77,7 +77,7 @@ function describe(a: any, label: string, run: any): string | null {
     case 'send.deferred':
       return `${label}: deferred (${a.reason}), will retry`;
     case 'send.unknown':
-      return `${label}: outcome UNKNOWN (${a.reason}) — conversation held, no automatic resend`;
+      return `${label}: outcome UNKNOWN (${a.reason}${d.providerCode ? `: ${d.providerCode}` : ''}) — conversation held, no automatic resend`;
     case 'send.resolved':
       return `${label}: outcome resolved as ${d.resolution ?? 'accepted'} (${a.reason})`;
     case 'send.blocked':

@@ -13,10 +13,10 @@
     "migrate": "tsx src/storage/migrate.ts",
     "seed": "tsx scripts/seed.ts",
     "demo": "tsx scripts/demo.ts",
-    "timeline": "tsx scripts/timeline.ts",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dev:embedded": "FAKES=1 TEMPORAL_ADDRESS=embedded tsx src/main.ts"
   },
   "dependencies": {
     "@temporalio/activity": "^1.25.0",

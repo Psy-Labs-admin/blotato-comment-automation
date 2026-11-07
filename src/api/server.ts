@@ -75,6 +75,27 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     return reply.code(202).send({ eventId: res.eventId, duplicate: res.duplicate });
   });
 
+  /** "What happened to this webhook?" — routing outcome and the run it started or touched. */
+  app.get('/events/:id', async (req, reply) => {
+    const tenantId = tenantOf(req, reply);
+    const id = idParam(req);
+    if (!tenantId) return;
+    const ev = id.success
+      ? (
+          await db.query(
+            `SELECT id, event_type, conversation_id, seq, received_at, routing_status, routing_outcome, run_id
+               FROM inbox_events WHERE id = $1 AND tenant_id = $2`,
+            [id.data, tenantId],
+          )
+        ).rows[0]
+      : undefined;
+    if (!ev) return reply.code(404).send({ error: 'not found' });
+    return {
+      id: ev.id, eventType: ev.event_type, conversationId: ev.conversation_id, seq: Number(ev.seq), receivedAt: ev.received_at,
+      routingStatus: ev.routing_status, routingOutcome: ev.routing_outcome, runId: ev.run_id,
+    };
+  });
+
   // ---- Automations ------------------------------------------------------------------------------
   const CreateAutomation = z.object({
     connectionId: Uuid,

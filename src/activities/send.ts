@@ -246,10 +246,10 @@ async function record(c: PoolClient, deps: ActivityDeps, intent: IntentRow, atte
       return { status: 'deferred', intentId: intent.id, retryAfterMs: out.retryAfterMs, reason: Reason.PROVIDER_THROTTLED };
 
     case 'unknown':
-      await c.query(`UPDATE message_intents SET status = 'unknown', status_reason = $2, updated_at = now() WHERE id = $1`, [intent.id, Reason.PROVIDER_TIMEOUT]);
-      await audit(c, { ...base, type: 'send.unknown', reason: Reason.PROVIDER_TIMEOUT, data: { providerCode: out.code } });
+      await c.query(`UPDATE message_intents SET status = 'unknown', status_reason = $2, updated_at = now() WHERE id = $1`, [intent.id, Reason.PROVIDER_NO_CONFIRMATION]);
+      await audit(c, { ...base, type: 'send.unknown', reason: Reason.PROVIDER_NO_CONFIRMATION, data: { providerCode: out.code } });
       await raiseIncident(c, { tenantId: intent.tenant_id, connectionId: intent.connection_id, errorClass: 'send_outcome_unknown', runId: intent.run_id });
-      return { status: 'unknown', intentId: intent.id, reason: Reason.PROVIDER_TIMEOUT };
+      return { status: 'unknown', intentId: intent.id, reason: Reason.PROVIDER_NO_CONFIRMATION };
   }
 }
 
