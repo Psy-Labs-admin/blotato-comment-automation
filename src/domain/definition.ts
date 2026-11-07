@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { parseDuration } from './duration';
 
 /**
  * A published automation is a validated document: one trigger and a short, ordered list of typed steps.
@@ -53,15 +54,10 @@ export class DefinitionError extends Error {
   }
 }
 
-const UNIT_MS: Record<string, number> = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
 const MIN_TIMEOUT_MS = 1_000;
 const MAX_TIMEOUT_MS = 30 * 86_400_000;
 
-export function parseDuration(s: string): number {
-  const m = /^(\d+)\s*([smhd])$/.exec(s.trim());
-  if (!m) throw new Error(`invalid duration "${s}" (expected e.g. 30s, 15m, 72h, 7d)`);
-  return Number(m[1]) * UNIT_MS[m[2]];
-}
+export { parseDuration };
 
 export function parseDefinition(input: unknown): AutomationDefinition {
   const parsed = AutomationDefinitionSchema.safeParse(input);
