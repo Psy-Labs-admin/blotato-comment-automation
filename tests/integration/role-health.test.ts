@@ -21,6 +21,8 @@ let data: Awaited<ReturnType<typeof createTestDb>>;
 let gateway: Awaited<ReturnType<typeof startFakeInstagram>>;
 let baseEnv: NodeJS.ProcessEnv;
 let apiUrl: string;
+let tenantId: string;
+const operatorToken = randomBytes(32).toString('hex');
 const metricsToken = randomBytes(32).toString('hex');
 const digest = (token: string) => createHash('sha256').update(token).digest('hex');
 
@@ -112,6 +114,7 @@ async function awaitReady(
 beforeAll(async () => {
   data = await createTestDb();
   const tenant = await seedTenant(data.db);
+  tenantId = tenant.tenantId;
   gateway = await startFakeInstagram();
   const port = await freePort();
   apiUrl = `http://127.0.0.1:${port}`;
@@ -128,7 +131,7 @@ beforeAll(async () => {
     TEMPORAL_TASK_QUEUE: 'role-health-' + randomUUID(),
     INSTAGRAM_BASE_URL: gateway.url,
     INSTAGRAM_API_TOKEN: randomBytes(32).toString('hex'),
-    TENANT_TOKEN_HASHES: JSON.stringify({ [tenant.tenantId]: digest(randomBytes(32).toString('hex')) }),
+    TENANT_TOKEN_HASHES: JSON.stringify({ [tenant.tenantId]: digest(operatorToken) }),
     METRICS_TOKEN_HASH: digest(metricsToken),
     WEBHOOK_SIGNING_SECRET: randomBytes(32).toString('hex'),
   };
@@ -160,10 +163,7 @@ it('runs the production API/worker/relay entrypoint and detects missing, ready a
   const splitPort = await freePort();
   const splitApi = role('api', {
     PORT: String(splitPort),
-    CRM_BASE_URL: gateway.url,
-    CRM_API_TOKEN: randomBytes(32).toString('hex'),
-    TELEGRAM_BOT_TOKEN: '123456:isolated-test-token-not-used',
-    TELEGRAM_CHAT_ID: '1',
+    EXPECTED_DELIVERIES: 'crm',
   });
   const splitUrl = `http://127.0.0.1:${splitPort}`;
   await awaitReady(503, 'attention', [splitApi, worker, relay], 10000, splitUrl);
@@ -172,12 +172,57 @@ it('runs the production API/worker/relay entrypoint and detects missing, ready a
   });
   expect(splitMetrics.status).toBe(200);
   const metricsText = await splitMetrics.text();
-  for (const kind of ['crm.lead_captured', 'alert.notify']) {
+  for (const kind of ['crm.lead_captured']) {
     expect(metricsText).toContain(`delivery_destination_configured{kind="${kind}"} 1`);
     expect(metricsText).toContain(`delivery_consumer_observed{kind="${kind}"} 0`);
   }
   expect(metricsText).toContain('service_role_ready{role="relay"} 0');
-  // No notification consumer ran and no request used the test-only Telegram token.
+  // A real capable relay can satisfy this expectation without putting CRM credentials on the API.
+  const capableRelay = role('relay', {
+    CRM_BASE_URL: gateway.url,
+    CRM_API_TOKEN: randomBytes(32).toString('hex'),
+    EXPECTED_DELIVERIES: 'alerts',
+  });
+  await awaitReady(200, 'ready', [splitApi, worker, relay, capableRelay], 20000, splitUrl);
+  // EXPECTED_DELIVERIES on a relay must never become an observed alert consumer.
+  const capableRows = await data.db.query(
+    `SELECT capabilities FROM service_heartbeats WHERE task_queue=$1 AND role='relay' AND state='ready'`,
+    [baseEnv.TEMPORAL_TASK_QUEUE],
+  );
+  expect(capableRows.rows.some((row) => row.capabilities.includes('crm'))).toBe(true);
+  expect(capableRows.rows.every((row) => !row.capabilities.includes('alerts'))).toBe(true);
+  await capableRelay.stop();
+  await awaitReady(503, 'attention', [splitApi, worker, relay], 10000, splitUrl);
+  const operations = await fetch(splitUrl + '/operator/operations', {
+    headers: { authorization: 'Bearer ' + operatorToken },
+  });
+  expect(operations.status).toBe(200);
+  const snapshot = (await operations.json()) as {
+    pipeline: { state: string };
+    queues: Array<{ kind: string; expected: boolean; configured: boolean; observed: boolean; state: string }>;
+  };
+  expect(snapshot.pipeline.state).toBe('attention');
+  expect(snapshot.queues.find((q) => q.kind === 'crm.lead_captured')).toMatchObject({
+    expected: true,
+    configured: true,
+    observed: false,
+    state: 'unavailable',
+  });
+  await data.db.query(
+    `INSERT INTO outbox(tenant_id,kind,idempotency_key,payload,status,created_at)
+    VALUES($1,'crm.lead_captured',$2,'{}','dead',now()-interval '5 minutes'),
+          ($1,'crm.lead_captured',$3,'{}','pending',now()-interval '5 minutes')`,
+    [tenantId, randomUUID(), randomUUID()],
+  );
+  const afterStopMetrics = await (
+    await fetch(splitUrl + '/metrics', { headers: { authorization: 'Bearer ' + metricsToken } })
+  ).text();
+  expect(afterStopMetrics).toContain('delivery_destination_configured{kind="crm.lead_captured"} 1');
+  expect(afterStopMetrics).toContain('delivery_consumer_observed{kind="crm.lead_captured"} 0');
+  expect(afterStopMetrics).toContain('outbox_dead_rows{kind="crm.lead_captured"} 1');
+  const age = /outbox_oldest_pending_seconds\{kind="crm.lead_captured"\} ([0-9.]+)/.exec(afterStopMetrics);
+  expect(Number(age?.[1])).toBeGreaterThan(120);
+  // No notification consumer ran and no Telegram credentials were configured.
   expect((await data.db.query('SELECT count(*)::int AS n FROM alert_deliveries')).rows[0].n).toBe(0);
   expect((await fetch(apiUrl + '/ready')).status).toBe(200);
   await splitApi.stop();

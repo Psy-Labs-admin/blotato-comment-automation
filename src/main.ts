@@ -51,13 +51,20 @@ async function main() {
       : cfg.alertSink
         ? webhookChannelKey(cfg.alertSink.baseUrl)
         : null;
+  // API expectations never enable or advertise a relay consumer.
+  const actualDestinations = {
+    crm: !!cfg.crm,
+    alerts: !!((cfg.telegramBotToken && cfg.telegramChatId) || cfg.alertSink),
+    metadata: !!(cfg.nativeInstagram || cfg.instagram),
+  };
+  const expected = (kind: 'crm' | 'alerts' | 'metadata') => servesHttp && cfg.expectedDeliveries.includes(kind);
   const operations = {
     namespace: cfg.temporalNamespace,
     taskQueue: cfg.taskQueue,
     destinations: {
-      crm: !!cfg.crm,
-      alerts: !!((cfg.telegramBotToken && cfg.telegramChatId) || cfg.alertSink),
-      metadata: !!(cfg.nativeInstagram || cfg.instagram),
+      crm: actualDestinations.crm || expected('crm'),
+      alerts: actualDestinations.alerts || expected('alerts'),
+      metadata: actualDestinations.metadata || expected('metadata'),
       alertDestinationKey,
       alertChannel:
         cfg.telegramBotToken && cfg.telegramChatId
@@ -254,7 +261,7 @@ async function main() {
       taskQueue: cfg.taskQueue,
       capabilities: [
         'dispatch',
-        ...Object.entries(operations.destinations)
+        ...Object.entries(actualDestinations)
           .filter(([, v]) => v === true)
           .map(([k]) => k),
         ...(notifier?.channel && notifier.channelKey

@@ -64,3 +64,12 @@ it('binds a public native OAuth callback to the operator console origin and keep
   expect(config.crm).toBeUndefined();
   expect(config.alertSink).toBeUndefined();
 });
+
+it('validates secret-free API delivery expectations without inventing integrations',()=>{
+ const cfg=loadConfig({...database,EXPECTED_DELIVERIES:'crm, alerts, metadata'});
+ expect(cfg.expectedDeliveries).toEqual(['crm','alerts','metadata']);
+ expect(cfg.crm).toBeUndefined();expect(cfg.telegramBotToken).toBeUndefined();expect(cfg.alertSink).toBeUndefined();
+ expect(loadConfig({...database,EXPECTED_DELIVERIES:'  '}).expectedDeliveries).toEqual([]);
+ for(const value of ['crm,crm','unknown','crm,','alerts,,metadata','CRM'])
+   expect(()=>loadConfig({...database,EXPECTED_DELIVERIES:value})).toThrow('EXPECTED_DELIVERIES');
+});

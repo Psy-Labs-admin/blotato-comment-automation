@@ -9,6 +9,7 @@ export interface HttpIntegration {
 export interface Config {
   role: Role;
   dispatchEnabled: boolean;
+  expectedDeliveries: Array<'crm' | 'alerts' | 'metadata'>;
   provisioningSecret?: string;
   integrationSettingsUrl?: string;
   port: number;
@@ -53,6 +54,11 @@ function integration(env: NodeJS.ProcessEnv, prefix: string): HttpIntegration | 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const role = env.ROLE ?? 'api';
   if (!['all', 'api', 'worker', 'relay'].includes(role)) throw new Error('ROLE must be all, api, worker or relay');
+  const expectation = env.EXPECTED_DELIVERIES?.trim() ?? '';
+  const expectedDeliveries = expectation ? expectation.split(',').map(v=>v.trim()) : [];
+  if (expectedDeliveries.some(v=>!['crm','alerts','metadata'].includes(v)) || new Set(expectedDeliveries).size!==expectedDeliveries.length) {
+    throw new Error('EXPECTED_DELIVERIES must be a comma-separated unique list of crm, alerts, metadata');
+  }
   const port = Number(env.PORT ?? 3000);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
   const days = Number(env.INBOX_RETENTION_DAYS ?? 30);
@@ -102,7 +108,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     }
   }
   return {
-    role: role as Role, dispatchEnabled, provisioningSecret, integrationSettingsUrl, port, databaseUrl, temporalAddress,
+    role: role as Role, dispatchEnabled, expectedDeliveries:expectedDeliveries as Config['expectedDeliveries'], provisioningSecret, integrationSettingsUrl, port, databaseUrl, temporalAddress,
     host: env.HOST?.trim() || '127.0.0.1',
     temporalNamespace: env.TEMPORAL_NAMESPACE ?? 'default',
     taskQueue: env.TEMPORAL_TASK_QUEUE ?? 'comment-automations',
