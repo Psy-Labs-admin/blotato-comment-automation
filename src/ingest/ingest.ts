@@ -5,6 +5,7 @@ import { Reason } from '../domain/reasons';
 import { audit } from '../storage/audit';
 import { requestRunCancel } from '../storage/controls';
 import { withTx } from '../storage/db';
+import { enqueueOutbox } from '../storage/outbox';
 import { NormalizedEventSchema } from './events';
 
 export type IngestResult =
@@ -77,12 +78,15 @@ export async function ingestEvent(deps: IngestDeps, raw: unknown): Promise<Inges
       return { status: 'accepted', eventId: existing.rows[0].id, duplicate: true } as const;
     }
     const eventId: string = inserted.rows[0].id;
+    if (e.type === 'comment.created' && !fromSelf) {
+      await enqueueOutbox(c, { tenantId, kind: 'metadata.hydrate', idempotencyKey: `metadata:${eventId}`, payload: { eventId } });
+    }
 
     await c.query(
       `UPDATE conversations SET last_inbound_seq = $2,
-         last_inbound_dm_at = CASE WHEN $3 THEN $4 ELSE last_inbound_dm_at END
+         last_inbound_dm_at = CASE WHEN $3 THEN greatest(last_inbound_dm_at, least($4::timestamptz, $5::timestamptz)) ELSE last_inbound_dm_at END
        WHERE id = $1`,
-      [conv.id, seq, e.type === 'message.received' && !fromSelf, now],
+      [conv.id, seq, e.type === 'message.received' && !fromSelf, e.occurredAt, now],
     );
 
     if (fromSelf) {

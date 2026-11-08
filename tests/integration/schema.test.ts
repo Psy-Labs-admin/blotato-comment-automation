@@ -106,6 +106,29 @@ describe('schema invariants', () => {
     ).rejects.toMatchObject({ code: '23503' });
   });
 
+  it('rejects optional event and audit references to another tenant run', async () => {
+    const other = (await db.query(`INSERT INTO tenants (name) VALUES ('audit_other') RETURNING id`)).rows[0].id;
+    const run = (await db.query(`SELECT id FROM automation_runs LIMIT 1`)).rows[0];
+    await expect(db.query(
+      `INSERT INTO run_audit_events (tenant_id, run_id, type) VALUES ($1, $2, 'cross_tenant')`,
+      [other, run.id],
+    )).rejects.toMatchObject({ code: '23503' });
+    const otherConnection = (await db.query(
+      `INSERT INTO social_connections (tenant_id, platform, external_account_id) VALUES ($1, 'instagram', 'other_audit') RETURNING id`,
+      [other],
+    )).rows[0].id;
+    const conv = (await db.query(
+      `INSERT INTO conversations (tenant_id, connection_id, participant_id) VALUES ($1, $2, 'person') RETURNING id`,
+      [other, otherConnection],
+    )).rows[0].id;
+    await expect(db.query(
+      `INSERT INTO inbox_events (tenant_id, connection_id, conversation_id, event_type, provider_event_key, seq,
+        participant_id, text, occurred_at, received_at, run_id)
+       VALUES ($1, $2, $3, 'message.received', 'bad_ref', 1, 'person', 'hello', now(), now(), $4)`,
+      [other, otherConnection, conv, run.id],
+    )).rejects.toMatchObject({ code: '23503' });
+  });
+
   it('rejects a conversation that points at another tenant connection', async () => {
     const other = (await db.query(`INSERT INTO tenants (name) VALUES ('other') RETURNING id`)).rows[0].id;
     await expect(

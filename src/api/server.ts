@@ -1,3 +1,4 @@
+import type { RequestTrace, TraceRouteGroup, Tracing } from '../observability/tracing';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Pool } from 'pg';
 import { z } from 'zod';
@@ -13,10 +14,15 @@ import { createAutomation, publishVersion, setAutomationStatus } from '../storag
 import { audit } from '../storage/audit';
 import { requestRunCancel } from '../storage/controls';
 import { withTx } from '../storage/db';
-import { enqueueOutbox } from '../storage/outbox';
+import { localRequest } from './loopback';
+import { bearerDigest, validWebhook, type ApiAccess } from './access';
+import { registerConsole } from '../ui';
 import { buildConversationTimeline, buildTimeline } from '../timeline';
 
 export interface ServerDeps {
+  access?: ApiAccess;
+  demo?: boolean;
+  tracing?: Tracing;
   db: Pool;
   clock: Clock;
   onOutbox?: () => void;
@@ -28,7 +34,7 @@ const Uuid = z.string().uuid();
 
 /**
  * Thin HTTP layer: webhook intake from the existing integration, and management/inspection for the
- * product. Tenant context comes from `x-tenant-id` (stand-in for the product's real auth); every
+ * product. A verified operator token selects the tenant. Local demos use x-tenant-id. Every
  * query is scoped by it, so another tenant's ids simply do not exist (404).
  */
 export function buildServer(deps: ServerDeps): FastifyInstance {
@@ -38,7 +44,50 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     logger: deps.logger === false ? false : { level: process.env.LOG_LEVEL ?? 'info', redact: ['req.headers.authorization'] },
   });
 
+  const tracing = deps.tracing;
+  if (tracing?.enabled) {
+    const spans = new WeakMap<FastifyRequest, RequestTrace>();
+    function finish(req: FastifyRequest, status: number) {
+      const route = req.routeOptions.url;
+      const group: TraceRouteGroup = !route ? 'unmatched'
+        : route === '/webhooks/instagram' ? 'webhook'
+        : route === '/health' ? 'health' : route === '/metrics' ? 'metrics'
+        : route === '/' || route.startsWith('/console') ? 'console' : 'management';
+      spans.get(req)?.end(status, group);
+      spans.delete(req);
+    }
+    app.addHook('onRequest', (req, _reply, done) => {
+      const span = tracing.startRequest(req.method);
+      spans.set(req, span);
+      span.run(done);
+    });
+    app.addHook('onResponse', async (req, reply) => finish(req, reply.statusCode));
+    app.addHook('onRequestAbort', async (req) => finish(req, 499));
+    app.addHook('onTimeout', async (req) => finish(req, 504));
+  }
+  if (!deps.access) {
+    app.addHook('onRequest', async (req, reply) => {
+      if (!localRequest(req.headers.host, req.headers.origin)) return reply.code(403).send({ error: 'Local requests only' });
+    });
+  }
+  if (deps.demo && !deps.access) {
+    app.get('/demo/workspace', async (_req, reply) => {
+      const connection = await db.query("SELECT tenant_id FROM social_connections WHERE platform = 'instagram' AND external_account_id = 'ig_demo_coffee'");
+      return connection.rowCount ? { tenantId: connection.rows[0].tenant_id } : reply.code(404).send({ error: 'Demo has not been seeded' });
+    });
+  }
+  registerConsole(app);
+  app.get('/', async (_req, reply) => reply.redirect('/console'));
+
   function tenantOf(req: FastifyRequest, reply: FastifyReply): string | undefined {
+    if (deps.access) {
+      const tenant = deps.access.tenants.get(bearerDigest(req.headers.authorization) ?? '');
+      if (!tenant || (req.headers['x-tenant-id'] && req.headers['x-tenant-id'] !== tenant)) {
+        reply.code(401).send({ error: 'A valid tenant access token is required' });
+        return undefined;
+      }
+      return tenant;
+    }
     const t = Uuid.safeParse(req.headers['x-tenant-id']);
     if (!t.success) {
       reply.code(401).send({ error: 'x-tenant-id header (uuid) required' });
@@ -48,31 +97,56 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   }
   const idParam = (req: FastifyRequest) => Uuid.safeParse((req.params as any).id);
 
-  app.get('/health', async () => {
-    await db.query('SELECT 1');
-    return { ok: true };
+  app.addHook('onSend', async (_req, reply) => {
+    reply.header('cache-control', 'no-store');
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('referrer-policy', 'no-referrer');
+  });
+  app.get('/health', async (_req, reply) => {
+    try {
+      await db.query('SELECT 1');
+      return { ok: true };
+    } catch {
+      return reply.code(503).send({ ok: false });
+    }
   });
 
-  app.get('/metrics', async (_req, reply) => {
+  app.get('/metrics', async (req, reply) => {
+    if (deps.access && bearerDigest(req.headers.authorization) !== deps.access.metricsDigest) {
+      return reply.code(401).send({ error: 'A monitoring token is required' });
+    }
     reply.header('content-type', metrics.registry.contentType);
     return metrics.registry.metrics();
   });
 
   // ---- Webhook intake ---------------------------------------------------------------------------
-  app.post('/webhooks/instagram', async (req, reply) => {
-    const res = await ingestEvent({ db, clock }, req.body);
-    const type = String((req.body as any)?.type ?? 'unknown').slice(0, 40);
-    if (res.status === 'rejected') {
-      metrics.webhooks.inc({ type, result: 'rejected' });
-      return reply.code(res.httpStatus).send({ error: res.reason });
-    }
-    metrics.webhooks.inc({ type, result: res.duplicate ? 'duplicate' : 'accepted' });
-    // The event is durable now. Routing is attempted inline for latency; if it fails, the sweeper
-    // routes it later, and the acknowledgement is unaffected.
-    if (!res.duplicate) {
-      await routeEvent({ db, clock, onOutbox: deps.onOutbox }, res.eventId).catch((err) => req.log.error({ err, eventId: res.eventId }, 'inline routing failed'));
-    }
-    return reply.code(202).send({ eventId: res.eventId, duplicate: res.duplicate });
+  app.register(async (hooks) => {
+    hooks.addContentTypeParser('application/json', { parseAs: 'buffer', bodyLimit: 65536 }, (_req, bytes, done) => done(null, bytes));
+    hooks.post('/webhooks/instagram', async (req, reply) => {
+      if (!Buffer.isBuffer(req.body)) return reply.code(415).send({ error: 'application/json required' });
+      if (deps.access && !validWebhook(req.body, req.headers['x-webhook-timestamp'], req.headers['x-webhook-signature'], deps.access.webhookSecret, clock.now())) {
+        return reply.code(401).send({ error: 'Invalid webhook signature or timestamp' });
+      }
+      let event;
+      try {
+        event = JSON.parse(req.body.toString('utf8'));
+      } catch {
+        return reply.code(400).send({ error: 'Invalid JSON' });
+      }
+      const type = ['comment.created', 'message.received'].includes(event?.type) ? event.type : 'unknown';
+      const ingest = () => ingestEvent({ db, clock }, event);
+      const res = await (tracing ? tracing.withSpan('webhook.ingest', ingest) : ingest());
+      if (res.status === 'rejected') {
+        metrics.webhooks.inc({ type, result: 'rejected' });
+        return reply.code(res.httpStatus).send({ error: res.reason });
+      }
+      metrics.webhooks.inc({ type, result: res.duplicate ? 'duplicate' : 'accepted' });
+      if (!res.duplicate) {
+        const route = () => routeEvent({ db, clock, onOutbox: deps.onOutbox }, res.eventId);
+        await (tracing ? tracing.withSpan('webhook.route', route) : route()).catch((err) => req.log.error({ err, eventId: res.eventId }, 'inline routing failed'));
+      }
+      return reply.code(202).send({ eventId: res.eventId, duplicate: res.duplicate });
+    });
   });
 
   /** "What happened to this webhook?" — routing outcome and the run it started or touched. */
@@ -162,13 +236,23 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   app.get('/runs', async (req, reply) => {
     const tenantId = tenantOf(req, reply);
     if (!tenantId) return;
-    const status = (req.query as any)?.status as string | undefined;
+    const filter = z.object({
+      status: z.enum(['starting', 'running', 'waiting_input', 'blocked_unknown', 'completed', 'cancelled', 'failed', 'expired']).optional(),
+      needsReview: z.enum(['true', 'false']).optional(), cursor: Uuid.optional(),
+    }).safeParse(req.query);
+    if (!filter.success) return reply.code(400).send({ error: 'Invalid run filters or cursor' });
+    const { status, needsReview, cursor } = filter.data;
     const r = await db.query(
-      `SELECT id, automation_id, status, status_reason, current_step, created_at, finished_at FROM automation_runs
-        WHERE tenant_id = $1 AND ($2::text IS NULL OR status = $2) ORDER BY created_at DESC LIMIT 200`,
-      [tenantId, status ?? null],
+      `SELECT r.id, r.automation_id, r.status, r.status_reason, r.current_step, r.created_at, r.finished_at, a.name AS automation_name, c.participant_id
+        FROM automation_runs r JOIN automations a ON a.id = r.automation_id JOIN conversations c ON c.id = r.conversation_id
+        WHERE r.tenant_id = $1 AND ($2::text IS NULL OR r.status = $2)
+          AND (NOT $3::boolean OR EXISTS (SELECT 1 FROM message_intents i WHERE i.run_id = r.id AND i.status = 'unknown'))
+          AND ($4::uuid IS NULL OR (r.created_at, r.id) < (SELECT created_at, id FROM automation_runs WHERE tenant_id = $1 AND id = $4))
+        ORDER BY r.created_at DESC, r.id DESC LIMIT 201`,
+      [tenantId, status ?? null, needsReview === 'true', cursor ?? null],
     );
-    return { runs: r.rows };
+    const runs = r.rows.slice(0, 200);
+    return { runs, nextCursor: r.rows.length > 200 ? runs[199].id : null };
   });
 
   app.get('/runs/:id', async (req, reply) => {
@@ -176,14 +260,22 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     const id = idParam(req);
     if (!tenantId) return;
     if (!id.success) return reply.code(404).send({ error: 'not found' });
-    const run = (await db.query(`SELECT * FROM automation_runs WHERE id = $1 AND tenant_id = $2`, [id.data, tenantId])).rows[0];
+    const run = (await db.query(`SELECT r.*, a.name AS automation_name, c.participant_id FROM automation_runs r
+      JOIN automations a ON a.id = r.automation_id JOIN conversations c ON c.id = r.conversation_id
+      WHERE r.id = $1 AND r.tenant_id = $2`, [id.data, tenantId])).rows[0];
     if (!run) return reply.code(404).send({ error: 'not found' });
-    const [intents, waits, lead] = await Promise.all([
+    const [intents, waits, lead, metadata] = await Promise.all([
       db.query(`SELECT id, step_id, action_no, kind, status, status_reason, attempt_count, provider_message_id, resolved_by FROM message_intents WHERE run_id = $1 ORDER BY created_at`, [run.id]),
       db.query(`SELECT id, step_id, status, deadline, clarifications_used FROM input_waits WHERE run_id = $1`, [run.id]),
       db.query(`SELECT id, email, email_status, crm_status FROM leads WHERE run_id = $1`, [run.id]),
+      db.query(
+        `SELECT e.media_id, m.status, m.metadata, m.fetched_at, m.expires_at
+         FROM inbox_events e LEFT JOIN post_metadata_cache m ON m.connection_id = e.connection_id
+         AND m.media_id = e.media_id AND m.tenant_id = e.tenant_id WHERE e.id = $1 AND e.tenant_id = $2`,
+        [run.trigger_event_id, tenantId],
+      ),
     ]);
-    return { run, intents: intents.rows, waits: waits.rows, lead: lead.rows[0] ?? null };
+    return { run, intents: intents.rows, waits: waits.rows, lead: lead.rows[0] ?? null, postMetadata: metadata.rows[0] ?? null };
   });
 
   app.get('/runs/:id/timeline', async (req, reply) => {
@@ -201,7 +293,11 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     if (!id.success) return reply.code(404).send({ error: 'not found' });
     const reason = String((req.body as any)?.reason ?? 'operator').slice(0, 100);
     const result = await withTx(db, async (c) => {
-      const run = (await c.query(`SELECT finished_at FROM automation_runs WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, [id.data, tenantId])).rows[0];
+      await c.query(
+        `SELECT 1 FROM conversations WHERE id = (SELECT conversation_id FROM automation_runs WHERE id = $1 AND tenant_id = $2) FOR UPDATE`,
+        [id.data, tenantId],
+      );
+      const run = (await c.query(`SELECT finished_at FROM automation_runs WHERE id = $1 AND tenant_id = $2`, [id.data, tenantId])).rows[0];
       if (!run) return 404;
       if (run.finished_at) return 409;
       await requestRunCancel(c, { tenantId, runId: id.data, reason, now: clock.now() });
@@ -265,21 +361,21 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     const tenantId = tenantOf(req, reply);
     const id = idParam(req);
     if (!tenantId) return;
-    const r = id.success
-      ? await db.query(
+    if (!id.success) return reply.code(404).send({ error: 'not found' });
+    const r = await withTx(db, async (c) => {
+      const changed = await c.query(
           `UPDATE social_connections SET sends_paused = false, sends_paused_reason = NULL, status = 'active' WHERE id = $1 AND tenant_id = $2`,
           [id.data, tenantId],
-        )
-      : { rowCount: 0 };
-    if (r.rowCount && id.success) {
-      await withTx(db, (c) => resolveIncident(c, { tenantId, connectionId: id.data, errorClass: 'connection_unauthorized' }));
-      deps.onOutbox?.();
-    }
+        );
+      if (changed.rowCount) await resolveIncident(c, { tenantId, connectionId: id.data, errorClass: 'connection_unauthorized' });
+      return changed;
+    });
+    if (r.rowCount) deps.onOutbox?.();
     return r.rowCount ? { sendsPaused: false } : reply.code(404).send({ error: 'not found' });
   });
 
   // ---- Operator resolution of uncertain sends -------------------------------------------------------
-  const Resolve = z.object({ resolution: z.enum(['accepted', 'not_sent']), note: z.string().min(1).max(500) });
+  const Resolve = z.object({ resolution: z.enum(['accepted', 'not_sent']), note: z.string().trim().min(1).max(500) });
 
   app.post('/intents/:id/resolve', async (req, reply) => {
     const tenantId = tenantOf(req, reply);
@@ -329,7 +425,9 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   app.get('/funnel', async (req, reply) => {
     const tenantId = tenantOf(req, reply);
     if (!tenantId) return;
-    const since = (req.query as any)?.since ? new Date((req.query as any).since) : new Date(0);
+    const filter = z.object({ since: z.string().datetime({ offset: true }).optional() }).safeParse(req.query);
+    if (!filter.success) return reply.code(400).send({ error: 'since must be an ISO 8601 timestamp with a timezone' });
+    const since = filter.data.since ? new Date(filter.data.since) : new Date(0);
     const f = (
       await db.query(
         `WITH runs AS (SELECT * FROM automation_runs WHERE tenant_id = $1 AND created_at >= $2)
@@ -340,6 +438,9 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
            (SELECT count(DISTINCT i.run_id)::int FROM message_intents i JOIN runs r ON r.id = i.run_id
               WHERE i.wait_id IS NOT NULL AND i.status = 'accepted') AS prompts_accepted,
            (SELECT count(*)::int FROM leads l JOIN runs r ON r.id = l.run_id) AS emails_captured,
+           (SELECT count(DISTINCT i.run_id)::int FROM message_intents i JOIN runs r ON r.id = i.run_id
+              WHERE i.kind = 'dm' AND i.wait_id IS NULL AND i.action_no = 1 AND i.status = 'accepted'
+                AND i.body ~* 'https?://[^[:space:]]+') AS links_accepted,
            (SELECT count(*)::int FROM runs WHERE status = 'completed') AS runs_completed,
            (SELECT count(*)::int FROM leads l JOIN runs r ON r.id = l.run_id WHERE l.crm_status = 'synced') AS crm_synced,
            (SELECT count(*)::int FROM message_intents i JOIN runs r ON r.id = i.run_id WHERE i.status = 'unknown') AS sends_unknown`,
@@ -358,6 +459,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       runsStarted: f.runs_started,
       promptsAccepted: f.prompts_accepted,
       emailsCaptured: f.emails_captured,
+      linksAccepted: f.links_accepted,
       runsCompleted: f.runs_completed,
       crmSynced: f.crm_synced,
       sendsUnknown: f.sends_unknown,

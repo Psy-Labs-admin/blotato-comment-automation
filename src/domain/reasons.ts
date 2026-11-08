@@ -20,6 +20,8 @@ export const Reason = {
   STOP_COMMAND: 'stop_command',
   // send policy
   RUN_CANCELLED: 'run_cancelled',
+  RUN_FINISHED: 'run_finished',
+  CONVERSATION_OWNERSHIP_LOST: 'conversation_ownership_lost',
   SENDS_PAUSED: 'sends_paused',
   WINDOW_CLOSED: 'window_closed',
   RATE_LIMITED: 'rate_limited',

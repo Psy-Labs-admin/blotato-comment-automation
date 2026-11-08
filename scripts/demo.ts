@@ -4,6 +4,7 @@
  *   4. CRM outage            5. business funnel
  * Requires: the app on :3000 with FAKES=1 (fake Instagram :4001, fake CRM :4002, alert sink :4003).
  */
+import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../src/config';
 import { createPool } from '../src/storage/db';
@@ -18,12 +19,18 @@ const c = { dim: '\x1b[2m', bold: '\x1b[1m', green: '\x1b[32m', yellow: '\x1b[33
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let ids: DemoIds;
 
+for (const url of [API, IG, CRM, SINK]) {
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(url).hostname)) throw new Error('Demo operations require loopback endpoints');
+}
+
 async function http(method: string, url: string, body?: unknown, tenant = true): Promise<any> {
   const res = await fetch(url, {
     method,
+    redirect: 'error',
     headers: { 'content-type': 'application/json', ...(tenant ? { 'x-tenant-id': ids.tenantId } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+  if (!res.ok) throw new Error(method + ' ' + new URL(url).pathname + ' returned HTTP ' + res.status);
   const text = await res.text();
   return text ? JSON.parse(text) : undefined;
 }
@@ -63,13 +70,15 @@ const ok = (msg: string) => console.log(`   ${c.green}✔${c.reset} ${msg}`);
 
 async function happyPath() {
   header(1, 'Happy path: comment → public reply → DM question → email → DM with link');
-  const who = `alice_${Date.now() % 100000}`;
+  const who = `alice_${randomUUID().slice(0, 8)}`;
   const ack = await http('POST', `${API}/webhooks/instagram`, comment(who), false);
   const runId = await runOf(ack.eventId);
   await waitStatus(runId, ['waiting_input']);
   ok('question accepted by Instagram; waiting for an email');
   await http('POST', `${API}/webhooks/instagram`, dm(who, `sure, it's ${who}@example.com`), false);
   const r = await waitStatus(runId, ['completed']);
+  assert.equal(r.lead.email, who + '@example.com');
+  assert.equal((await sentTo(who)).length, 1);
   ok(`run completed; lead ${r.lead.email} (${r.lead.email_status})`);
   await sleep(500);
   await printTimeline(runId);
@@ -77,20 +86,23 @@ async function happyPath() {
 
 async function duplicates() {
   header(2, 'The same comment webhook delivered 3 times');
-  const who = `bob_${Date.now() % 100000}`;
+  const who = `bob_${randomUUID().slice(0, 8)}`;
   const ev = comment(who);
   const acks = await Promise.all([1, 2, 3].map(() => http('POST', `${API}/webhooks/instagram`, ev, false)));
+  assert.equal(new Set(acks.map((ack) => ack.eventId)).size, 1);
+  assert.equal(acks.filter((ack) => !ack.duplicate).length, 1);
   console.log(`   acks: ${acks.map((a) => (a.duplicate ? 'duplicate' : 'accepted')).join(', ')}`);
   const runId = await runOf(acks[0].eventId);
   await waitStatus(runId, ['waiting_input']);
   const replies = ((await http('GET', `${IG}/__control/sent`, undefined, false)) as any[]).filter((m) => m.commentId === ev.commentId);
+  assert.equal(replies.length, 2);
   ok(`one run, ${replies.length} messages for that comment (public reply + private reply), no duplicates`);
   await http('POST', `${API}/runs/${runId}/cancel`, { reason: 'demo cleanup' });
 }
 
 async function lostAck() {
   header(3, 'Instagram accepts the link DM but the acknowledgement is lost');
-  const who = `carol_${Date.now() % 100000}`;
+  const who = `carol_${randomUUID().slice(0, 8)}`;
   await http('POST', `${IG}/__control/faults`, { mode: 'accept_then_drop', kind: 'dm', textIncludes: 'pricing' }, false);
   const ack = await http('POST', `${API}/webhooks/instagram`, comment(who), false);
   const runId = await runOf(ack.eventId);
@@ -110,13 +122,14 @@ async function lostAck() {
   console.log(`   operator checks the Instagram inbox and confirms the DM is there:`);
   await http('POST', `${API}/intents/${link.id}/resolve`, { resolution: 'accepted', note: 'visible in Instagram inbox' });
   await waitStatus(runId, ['completed']);
+  assert.equal((await sentTo(who)).length, 1);
   ok(`run completed; DMs Instagram stored for ${who}: ${(await sentTo(who)).length} (no duplicate)`);
   await printTimeline(runId);
 }
 
 async function crmOutage() {
   header(4, 'CRM is down while a lead is captured');
-  const who = `dan_${Date.now() % 100000}`;
+  const who = `dan_${randomUUID().slice(0, 8)}`;
   await http('POST', `${CRM}/__control/down`, { down: true }, false);
   const ack = await http('POST', `${API}/webhooks/instagram`, comment(who), false);
   const runId = await runOf(ack.eventId);
@@ -124,12 +137,17 @@ async function crmOutage() {
   await http('POST', `${API}/webhooks/instagram`, dm(who, `${who}@example.com`), false);
   let r = await waitStatus(runId, ['completed']);
   ok(`the person got the link anyway; lead crm_status=${r.lead.crm_status}`);
-  await sleep(1500);
+  for (let i = 0; i < 120; i++) {
+    const alerts: string[] = await http('GET', SINK + '/alerts', undefined, false);
+    if (alerts.some((t) => t.startsWith('[INCIDENT] CRM sync failing'))) break;
+    await sleep(100);
+  }
   await http('POST', `${CRM}/__control/down`, { down: false }, false);
   for (let i = 0; i < 100 && r.lead.crm_status !== 'synced'; i++) {
     await sleep(300);
     r = await http('GET', `${API}/runs/${runId}`);
   }
+  assert.equal(r.lead.crm_status, 'synced');
   ok(`CRM back: lead crm_status=${r.lead.crm_status}`);
 }
 

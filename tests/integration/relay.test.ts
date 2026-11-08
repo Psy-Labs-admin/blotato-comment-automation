@@ -87,6 +87,37 @@ describe('outbox relay', () => {
     expect(got).toEqual(['orphan']);
   });
 
+  it.each(['retry', 'dead', 'defer'] as const)('fences a stale %s result after a newer relay completes', async (result) => {
+    const key = `stale-${result}`;
+    await enqueue(key, 'workflow.signal');
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    let deadCalls = 0;
+    const old = new OutboxRelay({
+      db, kinds: ['workflow.signal'], maxAttempts: result === 'dead' ? 1 : 5, ...fast,
+      handlers: { 'workflow.signal': async () => {
+        entered();
+        await blocked;
+        if (result === 'defer') return { retryInMs: 0, reason: 'stale' };
+        throw new Error('stale');
+      } },
+      onDead: async () => { deadCalls += 1; },
+    });
+    const first = old.drainOnce();
+    await started;
+    await db.query(`UPDATE outbox SET locked_until = now() - interval '1 second' WHERE idempotency_key = $1`, [key]);
+    const current = new OutboxRelay({
+      db, kinds: ['workflow.signal'], ...fast, handlers: { 'workflow.signal': async () => {} },
+    });
+    await current.drainOnce();
+    release();
+    await first;
+    expect(await row(key)).toMatchObject({ status: 'done', attempts: 1, last_error: null });
+    expect(deadCalls).toBe(0);
+  });
+
   it('does not touch a row whose lease is still held', async () => {
     await enqueue('held', 'workflow.start');
     await db.query(`UPDATE outbox SET locked_until = now() + interval '1 minute' WHERE idempotency_key = 'held'`);

@@ -5,6 +5,7 @@ import { HttpAlertSink } from '../../src/adapters/alerts';
 import { startFakeInstagram, type FakeInstagram } from '../../src/fakes/fake-instagram';
 import { startFakeCrm, type FakeCrm } from '../../src/fakes/fake-crm';
 import { startFakeAlertSink, type FakeAlertSink } from '../../src/fakes/fake-alert-sink';
+import { sendJson, startServer } from '../../src/fakes/http';
 
 describe('Instagram adapter against the fault-injecting fake', () => {
   let ig: FakeInstagram;
@@ -103,6 +104,33 @@ describe('Instagram adapter against the fault-injecting fake', () => {
       (await adapter.send({ kind: 'comment_reply', accountId: 'ig_1', commentId: 'c', text: 't', clientRef: 'x' })).status,
     ).toBe('accepted');
     expect((await dm('y')).status).toBe('rejected');
+  });
+
+  it('does not forward or repeat a send through a provider redirect', async () => {
+    let forwarded = 0;
+    const target = await startServer((_req, res) => { forwarded++; sendJson(res, 200, { id: 'forwarded' }); });
+    const redirect = await startServer((_req, res) => sendJson(res, 307, {}, { location: target.url }));
+    try {
+      const client = new HttpInstagramAdapter(redirect.url);
+      expect(await client.send({ kind: 'dm', accountId: 'ig_1', recipientId: 'u', text: 'private', clientRef: 'redirect' })).toMatchObject({ status: 'unknown' });
+      expect(forwarded).toBe(0);
+    } finally {
+      await redirect.close();
+      await target.close();
+    }
+  });
+
+  it('honours an HTTP-date Retry-After hint', async () => {
+    const retryAt = new Date(Date.now() + 60_000);
+    const provider = await startServer((_req, res) => sendJson(res, 429, {}, { 'retry-after': retryAt.toUTCString() }));
+    try {
+      const client = new HttpInstagramAdapter(provider.url);
+      const out = await client.send({ kind: 'dm', accountId: 'ig_1', recipientId: 'u', text: 'hi', clientRef: 'date' });
+      expect(out.status).toBe('not_sent');
+      expect(out.status === 'not_sent' && out.retryAfterMs).toBeGreaterThan(55_000);
+    } finally {
+      await provider.close();
+    }
   });
 });
 

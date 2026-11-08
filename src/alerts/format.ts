@@ -7,7 +7,7 @@ const PLAYBOOK: Record<string, { title: string; auto: string; action: string }> 
   send_outcome_unknown: {
     title: 'Instagram sends with unknown outcome',
     auto: 'Conversations are held, nothing is re-sent automatically; reconciliation attempted where the adapter supports it.',
-    action: 'Review GET /runs?status=blocked_unknown and resolve each intent via POST /intents/:id/resolve.',
+    action: 'Review GET /runs?needsReview=true and resolve each intent via POST /intents/:id/resolve.',
   },
   connection_unauthorized: {
     title: 'Instagram account access revoked or expired',
@@ -29,6 +29,7 @@ const PLAYBOOK: Record<string, { title: string; auto: string; action: string }> 
 export function formatIncident(
   inc: { error_class: string; occurrences: number; affected_runs: string[]; first_seen_at: Date; tenant_name: string; account: string | null },
   kind: 'opened' | 'update' | 'resolved',
+  consoleUrl?: string,
 ): string {
   const p = PLAYBOOK[inc.error_class] ?? { title: inc.error_class, auto: '-', action: '-' };
   const head = kind === 'resolved' ? 'RESOLVED' : kind === 'opened' ? 'INCIDENT' : 'STILL OPEN';
@@ -40,5 +41,6 @@ export function formatIncident(
     `Affected conversations: ${inc.affected_runs.length} · occurrences: ${inc.occurrences} · since ${new Date(inc.first_seen_at).toISOString()}`,
     `Done automatically: ${p.auto}`,
     `Action: ${p.action}`,
+    ...(consoleUrl ? [consoleUrl + (inc.affected_runs[0] ? '#run=' + encodeURIComponent(inc.affected_runs[0]) : '')] : []),
   ].join('\n');
 }

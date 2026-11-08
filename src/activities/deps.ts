@@ -1,3 +1,4 @@
+import type { Tracing } from '../observability/tracing';
 import type { Pool } from 'pg';
 import type { SocialPlatform } from '../adapters/instagram';
 import type { Clock } from '../domain/clock';
@@ -20,6 +21,7 @@ export class SimulatedCrash extends Error {
 }
 
 export interface ActivityDeps {
+  tracing?: Tracing;
   db: Pool;
   clock: Clock;
   platform: SocialPlatform;

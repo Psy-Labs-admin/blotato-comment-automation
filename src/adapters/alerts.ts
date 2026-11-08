@@ -13,6 +13,7 @@ export class TelegramNotifier implements AlertNotifier {
   async notify(text: string): Promise<void> {
     const res = await fetch(`${this.apiBase}/bot${this.token}/sendMessage`, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ chat_id: this.chatId, text, disable_web_page_preview: true }),
       signal: AbortSignal.timeout(5_000),
@@ -28,6 +29,7 @@ export class HttpAlertSink implements AlertNotifier {
   async notify(text: string): Promise<void> {
     const res = await fetch(`${this.url}/alerts`, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text }),
       signal: AbortSignal.timeout(5_000),

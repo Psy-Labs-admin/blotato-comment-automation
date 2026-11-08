@@ -12,6 +12,7 @@ export interface GateContext {
   sendsPaused: boolean;
   conversation: { opted_out: boolean; human_takeover: boolean; last_inbound_dm_at: Date | null };
   triggerCommentAt: Date;
+  nextAttemptAt?: Date | null;
   now: Date;
 }
 
@@ -44,14 +45,20 @@ export async function checkSendPolicy(c: PoolClient, g: GateContext): Promise<Ga
   const caps = g.capabilities as Capabilities;
 
   const hours = (ms: number) => ms / 3_600_000;
-  if (g.kind === 'private_reply' && hours(g.now.getTime() - g.triggerCommentAt.getTime()) > caps.privateReplyWindowHours) {
+  if (g.kind === 'private_reply' && hours(g.now.getTime() - g.triggerCommentAt.getTime()) >= caps.privateReplyWindowHours) {
     return { ok: false, outcome: 'blocked', reason: Reason.WINDOW_CLOSED };
   }
   if (g.kind === 'dm') {
     const last = g.conversation.last_inbound_dm_at;
-    if (!last || hours(g.now.getTime() - last.getTime()) > caps.messagingWindowHours) {
+    if (!last || hours(g.now.getTime() - last.getTime()) >= caps.messagingWindowHours) {
       return { ok: false, outcome: 'blocked', reason: Reason.WINDOW_CLOSED };
     }
+  }
+
+  // Provider backoff survives activity retries, while cancellation and account controls above
+  // still apply immediately. An early re-check consumes no additional account budget.
+  if (g.nextAttemptAt && g.now.getTime() < g.nextAttemptAt.getTime()) {
+    return { ok: false, outcome: 'deferred', reason: Reason.PROVIDER_THROTTLED, retryAfterMs: g.nextAttemptAt.getTime() - g.now.getTime() };
   }
 
   // Per-recipient frequency across all automations: attempts that may have reached the person.
@@ -69,6 +76,9 @@ export async function checkSendPolicy(c: PoolClient, g: GateContext): Promise<Ga
   // call and not refunded on unknown outcomes (the platform may have counted it).
   const windowMs = caps.budgetWindowSeconds * 1000;
   const windowStart = new Date(Math.floor(g.now.getTime() / windowMs) * windowMs);
+  if (caps.sendsPerWindow === 0) {
+    return { ok: false, outcome: 'deferred', reason: Reason.RATE_LIMITED, retryAfterMs: windowStart.getTime() + windowMs - g.now.getTime() };
+  }
   const reserved = await c.query(
     `INSERT INTO send_budget (connection_id, window_start, used) VALUES ($1, $2, 1)
      ON CONFLICT (connection_id, window_start) DO UPDATE SET used = send_budget.used + 1

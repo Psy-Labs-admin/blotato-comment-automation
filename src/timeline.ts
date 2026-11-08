@@ -53,16 +53,11 @@ export async function buildTimeline(db: Pool, tenantId: string, runId: string): 
     });
   }
 
-  const lead = (await db.query(`SELECT crm_status FROM leads WHERE run_id = $1`, [runId])).rows[0];
-  if (lead && lead.crm_status !== 'synced') {
-    entries.push({
-      at: new Date().toISOString(),
-      type: 'crm.pending',
-      text: lead.crm_status === 'failed' ? 'CRM: delivery failed, kept for redelivery' : 'CRM: waiting for retry',
-      refs: {},
-    });
+  const lead = (await db.query('SELECT created_at FROM leads WHERE run_id = $1', [runId])).rows[0];
+  if (lead) {
+    entries.push({ at: lead.created_at.toISOString(), type: 'crm.pending', text: 'CRM: queued for synchronization', refs: {} });
   }
-  return entries;
+  return entries.sort((left, right) => left.at.localeCompare(right.at));
 }
 
 function describe(a: any, label: string, run: any): string | null {
@@ -71,7 +66,7 @@ function describe(a: any, label: string, run: any): string | null {
     case 'run.created':
       return `Rule "${run.definition.trigger.keyword}" matched; published version ${d.version ?? run.version} started`;
     case 'send.attempt_started':
-      return `${label}: attempt ${d.attemptNo} sent to Instagram`;
+      return `${label}: attempt ${d.attemptNo} reserved`;
     case 'send.accepted':
       return `${label}: accepted by Instagram`;
     case 'send.deferred':
@@ -102,6 +97,8 @@ function describe(a: any, label: string, run: any): string | null {
       return `Cancel requested (${a.reason})`;
     case 'run.status':
       return d.status === 'blocked_unknown' ? 'Run paused until the uncertain send is resolved' : null;
+    case 'crm.failed':
+      return 'CRM: delivery failed, kept for redelivery';
     case 'crm.synced':
       return 'CRM: lead synced';
     case 'conversation.held':

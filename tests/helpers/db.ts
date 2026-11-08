@@ -19,7 +19,7 @@ export async function createTestDb(): Promise<{ db: Pool; url: string; drop(): P
     url: url.toString(),
     async drop() {
       await db.end();
-      await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
+      await admin.query(`DROP DATABASE IF EXISTS ${name}`);
       await admin.end();
     },
   };

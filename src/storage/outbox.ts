@@ -1,6 +1,6 @@
 import type { PoolClient } from 'pg';
 
-export type OutboxKind = 'workflow.start' | 'workflow.signal' | 'crm.lead_captured' | 'alert.notify';
+export type OutboxKind = 'workflow.start' | 'workflow.signal' | 'crm.lead_captured' | 'alert.notify' | 'metadata.hydrate';
 
 export type WorkflowSignalName = 'inboxChanged' | 'cancelRequested' | 'intentResolved';
 

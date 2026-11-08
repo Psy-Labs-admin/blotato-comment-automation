@@ -20,6 +20,9 @@ export async function raiseIncident(
   c: PoolClient,
   i: { tenantId: string; connectionId?: string | null; errorClass: IncidentClass; runId?: string | null },
 ): Promise<void> {
+  if (i.connectionId) {
+    await c.query(`SELECT id FROM social_connections WHERE id = $1 FOR NO KEY UPDATE`, [i.connectionId]);
+  }
   const row = (
     await c.query(
       `INSERT INTO incidents (tenant_id, connection_id, error_class, affected_runs)
@@ -45,6 +48,9 @@ export async function raiseIncident(
 
 /** Closes the "unknown send" incident of an account once none of its sends is unknown any more. */
 export async function settleUnknownIncident(c: PoolClient, i: { tenantId: string; connectionId: string }): Promise<void> {
+  // Share the account lock with raiseIncident so a concurrent unknown cannot be
+  // hidden by a resolver that counted only committed intents from other conversations.
+  await c.query(`SELECT id FROM social_connections WHERE id = $1 FOR NO KEY UPDATE`, [i.connectionId]);
   const left = (
     await c.query(`SELECT count(*)::int AS n FROM message_intents WHERE connection_id = $1 AND status = 'unknown'`, [i.connectionId])
   ).rows[0].n;

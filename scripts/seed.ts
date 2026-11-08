@@ -13,7 +13,7 @@ export const demoDefinition = {
   trigger: { type: 'comment.created', platform: 'instagram', keyword: 'pricing', match: 'whole_word_case_insensitive', posts: 'all_supported' },
   steps: [
     { id: 'public_reply', type: 'reply_comment', text: 'Sent you a DM!' },
-    { id: 'ask_email', type: 'send_private_reply', text: 'Hi! What email should we send our pricing to?' },
+    { id: 'ask_email', type: 'send_private_reply', text: 'What is your email address? Reply here and I’ll send you the pricing link in this chat.' },
     {
       id: 'email', type: 'await_input', validator: 'email', promptStep: 'ask_email', timeout: '72h', maxClarifications: 1,
       clarificationText: "Hmm, that doesn't look like an email address. Could you send it again?",

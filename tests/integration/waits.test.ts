@@ -201,4 +201,35 @@ describe('waits, input consumption and leads', () => {
     expect(await finalizeRun(deps, { runId: clean.runId, outcome: 'completed' })).toEqual({ conversationReleased: true });
     expect(await finalizeRun(deps, { runId: clean.runId, outcome: 'completed' })).toEqual({ conversationReleased: true });
   });
+
+  it('a delayed prepare activity cannot leave an open wait after finalization', async () => {
+    const r = await runAtPrompt();
+    await finalizeRun(deps, { runId: r.runId, outcome: 'cancelled', reason: 'operator' });
+    const { waitId } = await prepareWait(deps, { runId: r.runId, stepId: 'delayed', promptStepId: 'ask_email', timeoutMs: 1_000, maxClarifications: 0 });
+    await activateWait(deps, { waitId });
+    expect((await db.query(`SELECT status FROM input_waits WHERE id = $1`, [waitId])).rows[0].status).toBe('cancelled');
+    expect(await evaluate(waitId)).toMatchObject({ kind: 'cancelled' });
+  });
+
+  it('concurrent finalizers record one terminal outcome and one finished event', async () => {
+    const r = await runAtPrompt();
+    const blocker = await db.connect();
+    await blocker.query('BEGIN');
+    await blocker.query(`SELECT 1 FROM conversations WHERE id = (SELECT conversation_id FROM automation_runs WHERE id = $1) FOR UPDATE`, [r.runId]);
+    const finalizers = [
+      finalizeRun(deps, { runId: r.runId, outcome: 'completed' }),
+      finalizeRun(deps, { runId: r.runId, outcome: 'cancelled', reason: 'operator' }),
+    ];
+    try {
+      await sleep(100);
+    } finally {
+      await blocker.query('COMMIT');
+      blocker.release();
+    }
+    await Promise.all(finalizers);
+    const finished = await db.query(`SELECT data FROM run_audit_events WHERE run_id = $1 AND type = 'run.finished'`, [r.runId]);
+    expect(finished.rowCount).toBe(1);
+    const run = (await db.query(`SELECT status FROM automation_runs WHERE id = $1`, [r.runId])).rows[0];
+    expect(run.status).toBe(finished.rows[0].data.outcome);
+  });
 });

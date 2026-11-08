@@ -57,7 +57,7 @@ commit.
 | Worker down during the wait → run resumes, deadline unchanged | [restart](tests/failure-scenarios/restart.test.ts) |
 | An activity that fails for good, or a workflow that disappears → run finalized visibly; a lost send becomes `unknown` with an incident | [stuck-runs](tests/failure-scenarios/stuck-runs.test.ts) |
 | Evidence that arrives without a wake-up signal is still noticed (periodic re-check) | [stuck-runs](tests/failure-scenarios/stuck-runs.test.ts) |
-| A late acceptance wakes the run, or releases a finished run's conversation; an operator's "not sent" is overridden, so no second DM | [send-ledger](tests/integration/send-ledger.test.ts), [waits](tests/integration/waits.test.ts) |
+| A late acceptance wakes the run, or releases a finished run's conversation; a late acceptance suppresses a new attempt if it arrives before the retry is reserved | [send-ledger](tests/integration/send-ledger.test.ts), [waits](tests/integration/waits.test.ts) |
 | Operator resolution racing with run finalization never strands a conversation | [api](tests/integration/api.test.ts) |
 | No question or clarification after the deadline; a valid email in the backlog beats earlier invalid ones | [waits](tests/integration/waits.test.ts) |
 | Pausing an account holds conversations; resume continues them | [stuck-runs](tests/failure-scenarios/stuck-runs.test.ts) |
@@ -71,24 +71,28 @@ commit.
 | Cancel / STOP / human takeover stop further sends; an unknown send keeps the conversation held | [cancel-and-stop](tests/failure-scenarios/cancel-and-stop.test.ts) |
 | Tenants with identical external ids never mix (enforced by composite FKs) | [routing](tests/integration/routing.test.ts), [api](tests/integration/api.test.ts), [schema](tests/integration/schema.test.ts) |
 
-`npm test` → 17 files, 140 tests, about 11–14 seconds.
+`npm test` → runs unit, integration, failure, UI-contract and historical workflow replay tests.
 
 ## Run it
 
-Requirements: Node ≥ 20.3, Docker (or a local Postgres plus the embedded Temporal dev server).
+Use Node 24 and Docker, or use a local PostgreSQL instance with the persistent Temporal dev server.
 
 ```bash
-npm install
+npm ci
 docker compose up -d     # Postgres :55432, Temporal :7233, Temporal UI :8233
 npm test                 # uses TEMPORAL_ADDRESS if set, else starts the Temporal dev server itself
 npm run dev              # API :3000 + worker + relay + fake Instagram :4001 / CRM :4002 / alert sink :4003
-npm run demo             # scripted scenarios with timelines (see docs/demo.md)
+npm run demo             # seeds a demo workspace and exercises four scenarios
 ```
 
 Tests create a throw-away database per file through `DATABASE_ADMIN_URL`
 (default `postgres://postgres:postgres@localhost:55432/postgres`). Without Docker:
 `DATABASE_ADMIN_URL=postgres://you@localhost:5432/postgres npm test`, and
 `DATABASE_URL=… npm run dev:embedded` for the app.
+
+Open [the conversation console](http://127.0.0.1:3000/console) and select **Open demo workspace** after running the demo. Use the status filter to find a run, inspect its timeline, or resolve an uncertain send once you have evidence. All demo traffic stays on the local machine.
+
+The Docker-free route requires a dedicated database owned by the app's local PostgreSQL role. Set `DATABASE_URL` for both the app and the demo script. Run `npm run dev:embedded` in one terminal and `npm run demo` in another. Temporal history is persisted in `.local/temporal.sqlite`. The test harness creates separate temporary databases using `DATABASE_ADMIN_URL`.
 
 ## API at a glance
 
@@ -102,7 +106,14 @@ Tests create a throw-away database per file through `DATABASE_ADMIN_URL`
 | `POST /intents/:id/resolve` | operator decision on an `unknown` send (`accepted` / `not_sent`, with note) |
 | `GET /funnel`, `GET /metrics`, `GET /health` | business funnel by run cohort; Prometheus gauges |
 
-Management routes take `x-tenant-id` as a stand-in for the product's auth.
+The local demo accepts a tenant UUID on loopback. Outside demo mode an operator bearer token identifies the tenant, the integration signs normalized webhooks, and metrics have a separate credential. See [operations](docs/operations.md#api-access).
+
+## Additional checks
+
+- [Operator access, webhook signatures and local demo isolation](docs/operations.md#api-access)
+- [OpenTelemetry export and a measured 100-deliveries/s workload](docs/observability.md)
+- [Replaying histories and upgrading pinned workers](docs/worker-upgrades.md)
+- [Synthetic receipt persistence after restart](tests/integration/demo-receipts.test.ts)
 
 ## Repository map
 
@@ -126,6 +137,5 @@ docs/             design, ADRs, demo, operations
 
 The Instagram adapter talks to a fake shaped like the Graph API. Blotato's real integration would
 sit behind the same `SocialPlatform` interface, and its windows and limits must be confirmed (they
-are configuration, not claims). Auth, webhook signature checks, encryption at rest, tracing,
-workflow replay tests and load tests are described in the design but not built. The full list is in
+are configuration, not claims). Platform credential provisioning, production hosting and infrastructure-level safeguards belong to the integration and hosting environment. See
 [design §15](docs/design.md#15-limitations-and-next-steps).

@@ -20,6 +20,7 @@ export class HttpCrmClient implements CrmClient {
   async upsertLead(e: LeadCapturedEvent, idempotencyKey: string): Promise<void> {
     const res = await fetch(`${this.baseUrl}/leads`, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'content-type': 'application/json', 'idempotency-key': idempotencyKey },
       body: JSON.stringify(e),
       signal: AbortSignal.timeout(this.opts.timeoutMs),

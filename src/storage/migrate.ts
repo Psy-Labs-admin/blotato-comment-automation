@@ -7,9 +7,13 @@ const MIGRATIONS_DIR = path.resolve(__dirname, '../../migrations');
 
 /** Applies migrations/*.sql in lexical order, once each, inside a transaction per file. */
 export async function migrate(db: Pool): Promise<string[]> {
-  await db.query(
-    `CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`,
-  );
+  await withTx(db, async (c) => {
+    // The migration ledger itself must be protected during a fresh concurrent startup.
+    await c.query(`SELECT pg_advisory_xact_lock(4242)`);
+    await c.query(
+      `CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`,
+    );
+  });
   const files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql')).sort();
   const applied: string[] = [];
   for (const file of files) {

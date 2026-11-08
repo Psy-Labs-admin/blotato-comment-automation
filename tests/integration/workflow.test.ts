@@ -53,6 +53,28 @@ describe('comment automation workflow (real Temporal + Postgres + HTTP fakes)', 
     expect(wait.status).toBe('expired');
   });
 
+  it('a valid reply interrupts a throttled clarification and completes without sending that clarification', async () => {
+    await publishVersion(h.db, { tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '30s' }) });
+    const platform = h.deps.platform;
+    h.deps.platform = {
+      send: async (request) => request.text.includes("doesn't look like")
+        ? { status: 'not_sent' as const, code: 'throttled', retryAfterMs: 60_000, httpStatus: 429 }
+        : platform.send(request),
+    };
+    try {
+      const { runId } = await h.comment('clarification_backoff');
+      await h.waitForRun(runId!, 'waiting_input');
+      await h.dm('clarification_backoff', 'why?');
+      await h.waitFor(async () => (await h.intents(runId!)).find((intent) => intent.step_id === 'email' && intent.status === 'pending'), 5_000, 'throttled clarification');
+      await h.dm('clarification_backoff', 'ready@example.com');
+      expect((await h.waitForRun(runId!, undefined, 4_000)).status).toBe('completed');
+      expect(h.messagesFor('clarification_backoff')).toHaveLength(1);
+      expect((await h.lead(runId!)).email).toBe('ready@example.com');
+    } finally {
+      h.deps.platform = platform;
+    }
+  });
+
   it('a version published while a run waits does not change that run; new runs use it', async () => {
     await publishVersion(h.db, { tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '30s', link: 'https://example.com/v-old' }) });
     const { runId: oldRun } = await h.comment('dave');

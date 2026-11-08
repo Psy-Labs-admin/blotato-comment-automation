@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Conversations · Blotato</title>
+    <link rel="stylesheet" href="/console.css" />
+    <script src="/console.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to conversations</a>
+    <header class="topbar">
+      <a class="brand" href="/console" aria-label="Blotato conversations home"
+        >blotato<span>Conversations</span></a
+      >
+      <div class="session" id="session" hidden>
+        <span id="workspace-label"></span
+        ><button id="disconnect" class="quiet">Disconnect</button>
+      </div>
+    </header>
+    <main id="main">
+      <section class="login" id="login" aria-labelledby="login-title">
+        <div class="login-intro">
+          <h1 id="login-title">Follow every conversation.</h1>
+          <p>
+            Inspect automation runs, see what happened, and resolve messages
+            that need attention.
+          </p>
+        </div>
+        <form id="connect-form" class="connect-form">
+          <h2>Open your workspace</h2>
+          <button id="open-demo" type="button" hidden>
+            Open demo workspace
+          </button>
+          <label for="token">Access token</label
+          ><input
+            id="token"
+            name="token"
+            type="password"
+            autocomplete="off"
+            placeholder="Enter your workspace access token"
+          />
+          <details>
+            <summary>Local development</summary>
+            <label for="tenant">Workspace ID</label
+            ><input
+              id="tenant"
+              name="tenant"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Tenant UUID for unsecured local use"
+            />
+          </details>
+          <p class="help">
+            Use the credentials supplied by your administrator. Credentials stay
+            in this tab until you disconnect or reload.
+          </p>
+          <button class="primary" type="submit" id="connect-button">
+            Connect workspace
+          </button>
+          <p id="login-error" class="error" role="alert" hidden></p>
+        </form>
+      </section>
+      <div id="workspace" hidden>
+        <div class="page-title">
+          <div><h1>Conversations</h1></div>
+          <div class="refresh">
+            <span id="updated"></span><button id="refresh">Refresh</button>
+          </div>
+        </div>
+        <p id="notice" class="notice" role="status" hidden></p>
+        <p id="error" class="error" role="alert" hidden></p>
+        <section
+          aria-label="Automation funnel"
+          class="funnel"
+          id="funnel"
+        ></section>
+        <div class="toolbar">
+          <div>
+            <label for="status">Run status</label
+            ><select id="status">
+              <option value="">All statuses</option>
+              <option value="needs_review">Needs review</option>
+              <option value="waiting_input">Waiting for email</option>
+              <option value="starting">Starting</option>
+              <option value="running">Running</option>
+              <option value="completed">Completed</option>
+              <option value="expired">Expired</option>
+              <option value="cancelled">Cancelled</option>
+              <option value="failed">Failed</option>
+            </select>
+          </div>
+          <details class="lookup">
+            <summary>Find an inbound event</summary>
+            <form id="event-form">
+              <label for="event-id">Event ID</label>
+              <div class="inline">
+                <input
+                  id="event-id"
+                  required
+                  autocomplete="off"
+                  placeholder="Event UUID"
+                /><button type="submit">Look up</button>
+              </div>
+            </form>
+            <div id="event-result" aria-live="polite"></div>
+          </details>
+        </div>
+        <div class="workbench">
+          <section class="run-panel" aria-labelledby="runs-title">
+            <div class="panel-heading">
+              <h2 id="runs-title">Recent runs</h2>
+              <span id="run-count"></span>
+            </div>
+            <div id="runs" class="run-list" aria-live="polite"></div>
+            <button id="load-older" type="button" hidden>
+              Load older runs
+            </button>
+          </section>
+          <section
+            class="detail-panel"
+            aria-labelledby="detail-title"
+            id="detail"
+          >
+            <div class="empty">
+              <h2 id="detail-title">Choose a conversation</h2>
+              <p>Select a run to inspect its timeline and message outcomes.</p>
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
+    <dialog id="resolve-dialog" aria-labelledby="resolve-title">
+      <form id="resolve-form">
+        <h2 id="resolve-title">Resolve uncertain message</h2>
+        <p>Check the platform's message history before recording a decision.</p>
+        <fieldset>
+          <legend>What does the evidence show?</legend>
+          <label class="choice"
+            ><input type="radio" name="resolution" value="accepted" required />
+            The platform accepted this message</label
+          ><label class="choice"
+            ><input type="radio" name="resolution" value="not_sent" required />
+            The message was never sent</label
+          >
+        </fieldset>
+        <p class="help">
+          Confirming it was never sent allows an active run to attempt sending
+          again.
+        </p>
+        <label for="resolution-note">Evidence and reason</label
+        ><textarea
+          id="resolution-note"
+          required
+          maxlength="500"
+          rows="3"
+        ></textarea>
+        <p id="resolve-error" class="error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button type="button" id="close-resolve">Keep unresolved</button
+          ><button class="primary" id="save-resolution" type="submit">
+            Record decision
+          </button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

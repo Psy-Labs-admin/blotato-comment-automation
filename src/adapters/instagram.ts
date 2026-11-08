@@ -53,6 +53,7 @@ export class HttpInstagramAdapter implements SocialPlatform {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
+        redirect: 'manual',
         signal: AbortSignal.timeout(this.opts.timeoutMs),
       });
     } catch (err) {
@@ -89,7 +90,7 @@ export class HttpInstagramAdapter implements SocialPlatform {
   async lookupByClientRef(accountId: string, clientRef: string): Promise<LookupResult> {
     const res = await fetch(
       `${this.baseUrl}/v1/${encodeURIComponent(accountId)}/messages?client_ref=${encodeURIComponent(clientRef)}`,
-      { signal: AbortSignal.timeout(this.opts.timeoutMs) },
+      { signal: AbortSignal.timeout(this.opts.timeoutMs), redirect: 'manual' },
     );
     if (!res.ok) throw new Error(`lookup failed: HTTP ${res.status}`);
     const json: any = await res.json();
@@ -114,8 +115,12 @@ export class HttpInstagramAdapter implements SocialPlatform {
 }
 
 function retryAfterMs(res: Response): number {
-  const h = Number(res.headers.get('retry-after'));
-  return Number.isFinite(h) && h > 0 ? h * 1000 : 5_000;
+  const header = res.headers.get('retry-after');
+  if (!header) return 5_000;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.max(100, seconds * 1000);
+  const date = Date.parse(header);
+  return Number.isFinite(date) ? Math.max(100, date - Date.now()) : 5_000;
 }
 
 function classifyNetworkError(err: unknown): SendOutcome {

@@ -49,7 +49,10 @@ export function parseCapabilities(raw: unknown): Partial<Capabilities> {
   const out: Partial<Capabilities> = {};
   for (const k of NUMERIC_CAPABILITIES) {
     const v = r[k];
-    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) out[k] = v;
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) continue;
+    if (k === 'budgetWindowSeconds' && (v === 0 || !Number.isFinite(v * 1000))) continue;
+    if ((k === 'sendsPerWindow' || k === 'recipientHourlyLimit') && !Number.isSafeInteger(v)) continue;
+    out[k] = v;
   }
   if (r.reconciliation === 'lookup_by_client_ref' || r.reconciliation === 'none') out.reconciliation = r.reconciliation;
   return out;

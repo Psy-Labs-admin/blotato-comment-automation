@@ -1,3 +1,5 @@
+import type { Tracing } from '../observability/tracing';
+import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { withTx } from '../storage/db';
 import type { OutboxKind } from '../storage/outbox';
@@ -15,6 +17,7 @@ export interface OutboxRow {
 export type OutboxHandler = (row: OutboxRow) => Promise<void | { retryInMs: number; reason: string }>;
 
 export interface RelayOptions {
+  tracing?: Tracing;
   db: Pool;
   kinds: OutboxKind[];
   handlers: Partial<Record<OutboxKind, OutboxHandler>>;
@@ -50,6 +53,7 @@ export class OutboxRelay {
 
   async drainOnce(): Promise<number> {
     const { db, kinds } = this.o;
+    const claimToken = randomUUID();
     const rows = await withTx(db, async (c) => {
       const r = await c.query(
         `SELECT id, tenant_id, kind, idempotency_key, payload, attempts FROM outbox
@@ -59,53 +63,54 @@ export class OutboxRelay {
         [kinds, this.o.batchSize ?? 20],
       );
       if (r.rowCount) {
-        await c.query(`UPDATE outbox SET locked_until = now() + make_interval(secs => $2) WHERE id = ANY($1)`, [
+        await c.query(`UPDATE outbox SET locked_until = now() + make_interval(secs => $2), claim_token = $3 WHERE id = ANY($1)`, [
           r.rows.map((x) => x.id),
           (this.o.leaseMs ?? 30_000) / 1000,
+          claimToken,
         ]);
       }
       return r.rows.map(
         (x): OutboxRow => ({ id: x.id, tenantId: x.tenant_id, kind: x.kind, idempotencyKey: x.idempotency_key, payload: x.payload, attempts: x.attempts }),
       );
     });
-    await Promise.all(rows.map((row) => this.process(row)));
+    await Promise.all(rows.map((row) => this.process(row, claimToken)));
     return rows.length;
   }
 
-  private async process(row: OutboxRow): Promise<void> {
+  private async process(row: OutboxRow, claimToken: string): Promise<void> {
     const { db } = this.o;
     const handler = this.o.handlers[row.kind];
     try {
       if (!handler) throw new Error(`no handler for ${row.kind}`);
-      const res = await handler(row);
+      const res = await (this.o.tracing ? this.o.tracing.withSpan('relay.deliver', () => handler(row)) : handler(row));
       if (res && 'retryInMs' in res) {
         await db.query(
-          `UPDATE outbox SET next_attempt_at = now() + make_interval(secs => $2), locked_until = NULL, last_error = $3 WHERE id = $1`,
-          [row.id, res.retryInMs / 1000, res.reason],
+          `UPDATE outbox SET next_attempt_at = now() + make_interval(secs => $2), locked_until = NULL, claim_token = NULL, last_error = $3 WHERE id = $1 AND status = 'pending' AND claim_token = $4`,
+          [row.id, res.retryInMs / 1000, res.reason, claimToken],
         );
         return;
       }
       await db.query(
-        `UPDATE outbox SET status = 'done', done_at = now(), attempts = attempts + 1, locked_until = NULL WHERE id = $1`,
-        [row.id],
+        `UPDATE outbox SET status = 'done', done_at = now(), attempts = attempts + 1, locked_until = NULL, claim_token = NULL WHERE id = $1 AND status = 'pending' AND claim_token = $2`,
+        [row.id, claimToken],
       );
     } catch (err) {
       const attempts = row.attempts + 1;
       const error = String(err);
       if (attempts >= (this.o.maxAttempts ?? 25)) {
         await withTx(db, async (c) => {
-          await c.query(
-            `UPDATE outbox SET status = 'dead', attempts = $2, last_error = $3, locked_until = NULL WHERE id = $1`,
-            [row.id, attempts, error],
+          const dead = await c.query(
+            `UPDATE outbox SET status = 'dead', done_at = now(), attempts = $2, last_error = $3, locked_until = NULL, claim_token = NULL WHERE id = $1 AND status = 'pending' AND claim_token = $4`,
+            [row.id, attempts, error, claimToken],
           );
-          await this.o.onDead?.(c, { ...row, attempts }, error);
+          if (dead.rowCount) await this.o.onDead?.(c, { ...row, attempts }, error);
         });
       } else {
         const delay = (this.o.backoff ?? jitteredBackoff)(attempts);
         await db.query(
-          `UPDATE outbox SET attempts = $2, last_error = $3, locked_until = NULL,
-             next_attempt_at = now() + make_interval(secs => $4) WHERE id = $1`,
-          [row.id, attempts, error, delay / 1000],
+          `UPDATE outbox SET attempts = $2, last_error = $3, locked_until = NULL, claim_token = NULL,
+             next_attempt_at = now() + make_interval(secs => $4) WHERE id = $1 AND status = 'pending' AND claim_token = $5`,
+          [row.id, attempts, error, delay / 1000, claimToken],
         );
       }
     }

@@ -10,6 +10,19 @@
 
 All roles run migrations on start (serialised by an advisory lock). Configuration: `.env.example`.
 
+## API access
+
+The demo binds to `127.0.0.1` and accepts only loopback Host and same-origin browser requests. `FAKES=1` routes Instagram, CRM and alerts to local simulators even if external settings exist. Development credentials select synthetic tenant data. The API disables this mode when `NODE_ENV=production`.
+
+For a non-demo API set the following secrets through your deployment environment. Use TLS at the trusted ingress and restrict database, Temporal and adapter endpoints to the private service network.
+
+- `TENANT_TOKEN_HASHES` is a JSON object mapping tenant UUIDs to SHA-256 hex digests of distinct, high-entropy operator tokens. Present the original token in `Authorization: Bearer <token>`. Tenant operators can read leads and resolve uncertain sends for their own workspace.
+- `METRICS_TOKEN_HASH` is the digest of a separate token for `GET /metrics`.
+- `WEBHOOK_SIGNING_SECRET` is a separate shared signing key of at least 32 bytes. The existing Instagram integration verifies Meta's callbacks and signs its normalized JSON for this service. Send Unix seconds in `x-webhook-timestamp` and `sha256=<lowercase hex>` in `x-webhook-signature`. Compute HMAC-SHA256 over timestamp, literal dot and the exact UTF-8 request bytes. Retries outside five minutes need a fresh signature. The original provider event ID still deduplicates the delivery.
+- `HOST` defaults to loopback. The read-only public console shell carries no customer data. Operator credentials are held in page memory.
+
+Set `CONSOLE_ORIGIN` to the public HTTPS origin to include an authenticated run-inspection link in operational alerts. The local demo uses its loopback console automatically.
+
 ## Signals to watch
 
 | Metric | Meaning | Alert when |
@@ -27,7 +40,7 @@ All roles run migrations on start (serialised by an advisory lock). Configuratio
 Each Telegram/sink alert names the class, account, number of affected conversations and the action.
 
 ### `send_outcome_unknown`: Instagram may or may not have received a message
-1. `GET /runs?status=blocked_unknown` (tenant header) and open each run's `GET /runs/:id/timeline`.
+1. `GET /runs?status=blocked_unknown` (operator bearer token, or tenant header in the local demo) and open each run's `GET /runs/:id/timeline`.
 2. Check the conversation in the Instagram inbox (or the provider's logs, if available).
 3. `POST /intents/:id/resolve` with `{"resolution":"accepted","note":"…"}` if the message is there, or
    `{"resolution":"not_sent","note":"…"}` to authorise **one** deliberate new attempt.
@@ -51,14 +64,14 @@ people can trigger again after the cooldown.
 
 ### `crm_delivery_failing`
 Conversations are unaffected. Leads stay `pending` and are retried with backoff. Fix the CRM side;
-the incident resolves on the next successful delivery. Rows that exhaust retries become dead-letter
+the incident resolves once the account's outstanding leads have synced. Rows that exhaust retries become dead-letter
 (`outbox.status = 'dead'`, lead `crm_status = 'failed'`). Redeliver with
 `UPDATE outbox SET status='pending', attempts=0, next_attempt_at=now() WHERE id=…` once the cause is
 fixed. The idempotency key makes this safe.
 
 ### `outbox_dead_letter`
 Inspect `SELECT kind, last_error FROM outbox WHERE status='dead'`. Redeliver as above after fixing.
-Only CRM and alert rows can dead-letter. Temporal start/signal commands retry indefinitely, so watch
+CRM, metadata and alert rows can dead-letter. Temporal start/signal commands retry indefinitely, so watch
 `outbox_oldest_pending_seconds{kind=~"workflow.*"}` for Temporal outages instead.
 
 ## Controls
@@ -77,13 +90,17 @@ Only CRM and alert rows can dead-letter. Temporal start/signal commands retry in
 - **Definitions** are data: new versions affect new runs only.
 - **Workflow code** must stay replay-compatible with running histories. Use `patched()` for small
   changes, and Temporal Worker Versioning (pinned deployments) for larger ones. Keep old workers
-  until their runs drain. Add replay tests against exported production histories in CI.
+  until their runs drain. CI replays a recorded history from the previous version. Add representative histories when changing command order.
 - **Schema**: additive migrations first, code second, cleanup later. Activities must tolerate both
   shapes during a rollout.
 
-## Data retention
+## Metadata and data retention
 
-`inbox_events.text` and `leads.email` are customer data. Recommended: encrypt at rest, restrict
-access, purge `inbox_events.text` after 30–90 days (keep the row and routing outcome for the
-funnel), and keep `run_audit_events` (ids and reason codes only) longer. Partition both tables by
-month once volume requires it.
+The metadata relay reads the existing integration's normalized post endpoint after webhook acceptance. A successful response is cached per account and media for one hour. Access-denied and missing responses are cached for five minutes. The run inspector shows the most recently fetched snapshot and its timestamp. A metadata outage leaves the conversation free to proceed.
+
+Set `INBOX_RETENTION_ENABLED=1` and `INBOX_RETENTION_DAYS` to opt in to redaction. Every minute the relay redacts up to 100 routed inbox bodies older than the cutoff and records the redaction time. It skips conversations with an owner, an unfinished run, an open wait or an uncertain send. Event identity, ordering and audit records survive, so a repeated delivery still deduplicates. Lead retention is a separate customer policy.
+
+
+Inbox bodies, leads, metadata, database backups and simulator receipts can contain customer content. Use encrypted storage and control access to backups. The local interview demonstration uses synthetic conversations.
+
+See [tracing and the load check](observability.md) and [pinned worker upgrades](worker-upgrades.md) for reproduction steps.

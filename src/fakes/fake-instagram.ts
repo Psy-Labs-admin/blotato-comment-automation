@@ -1,5 +1,7 @@
+import type { DemoReceipts } from './receipts';
 import { randomUUID } from 'node:crypto';
 import type { SendKind } from '../domain/types';
+import type { MetadataResult } from '../metadata/client';
 import { sendJson, startServer } from './http';
 
 /**
@@ -51,13 +53,18 @@ export interface FakeInstagram {
   url: string;
   sent(): SentMessage[];
   pushFault(f: Fault): void;
+  setPostMetadata(accountId: string, mediaId: string, result: MetadataResult): void;
+  metadataRequests(): Array<{ accountId: string; mediaId: string }>;
   reset(): void;
   close(): Promise<void>;
 }
 
-export async function startFakeInstagram(port = 0): Promise<FakeInstagram> {
-  let sent: SentMessage[] = [];
+export async function startFakeInstagram(port = 0, receipts?: DemoReceipts): Promise<FakeInstagram> {
+  let sent: SentMessage[] = receipts?.read<SentMessage>('instagram').map(([, message]) => message) ?? [];
   let faults: Fault[] = [];
+  const posts = new Map<string, MetadataResult>();
+  let metadataRequests: Array<{ accountId: string; mediaId: string }> = [];
+  const postKey = (accountId: string, mediaId: string) => JSON.stringify([accountId, mediaId]);
 
   const takeFault = (kind: SendKind, text: string): Fault => {
     const i = faults.findIndex((f) => (!f.kind || f.kind === kind) && (!f.textIncludes || text.includes(f.textIncludes)));
@@ -75,10 +82,25 @@ export async function startFakeInstagram(port = 0): Promise<FakeInstagram> {
       }
       if (req.method === 'GET' && parts[1] === 'sent') return sendJson(res, 200, sent);
       if (req.method === 'POST' && parts[1] === 'reset') {
+        receipts?.clear('instagram');
         sent = [];
         faults = [];
+        posts.clear();
+        metadataRequests = [];
         return sendJson(res, 200, { ok: true });
       }
+    }
+
+    // Existing integration metadata contract, independent of send fault injection.
+    if (req.method === 'GET' && parts[0] === 'v1' && parts[2] === 'media' && parts[3]) {
+      const accountId = decodeURIComponent(parts[1]);
+      const mediaId = decodeURIComponent(parts[3]);
+      metadataRequests.push({ accountId, mediaId });
+      const result = posts.get(postKey(accountId, mediaId)) ?? {
+        status: 'available', metadata: { caption: `Demo post ${mediaId}`, mediaType: 'IMAGE' },
+      };
+      if (result.status === 'available') return sendJson(res, 200, result.metadata);
+      return sendJson(res, result.status === 'denied' ? 403 : 404, { error: 'post unavailable' });
     }
 
     // GET /v1/:account/messages?client_ref=...
@@ -104,6 +126,7 @@ export async function startFakeInstagram(port = 0): Promise<FakeInstagram> {
     const fault = takeFault(msg.kind, msg.text ?? '');
     const record = () => {
       const stored: SentMessage = { ...msg!, id: `mid_${randomUUID().slice(0, 12)}`, at: new Date().toISOString() };
+      receipts?.put('instagram', stored.id, stored);
       sent.push(stored);
       return stored;
     };
@@ -143,9 +166,14 @@ export async function startFakeInstagram(port = 0): Promise<FakeInstagram> {
     url: server.url,
     sent: () => [...sent],
     pushFault: (f) => faults.push(f),
+    setPostMetadata: (accountId, mediaId, result) => posts.set(postKey(accountId, mediaId), result),
+    metadataRequests: () => [...metadataRequests],
     reset: () => {
+      receipts?.clear('instagram');
       sent = [];
       faults = [];
+      posts.clear();
+      metadataRequests = [];
     },
     close: server.close,
   };

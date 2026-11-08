@@ -5,3 +5,5 @@ dist/
 coverage/
 *.log
 .demo.json
+
+.local/

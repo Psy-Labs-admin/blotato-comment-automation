@@ -63,7 +63,7 @@ export async function routeEvent(deps: RouterDeps, eventId: string): Promise<Rou
  */
 export async function routePending(deps: RouterDeps, limit = 100): Promise<number> {
   const pending = await deps.db.query(
-    `SELECT id FROM inbox_events WHERE routing_status = 'pending' ORDER BY received_at LIMIT $1`,
+    `SELECT id FROM inbox_events WHERE routing_status = 'pending' AND next_routing_attempt_at <= now() ORDER BY next_routing_attempt_at, received_at, id LIMIT $1`,
     [limit],
   );
   let routed = 0;
@@ -72,6 +72,12 @@ export async function routePending(deps: RouterDeps, limit = 100): Promise<numbe
       await routeEvent(deps, row.id);
       routed += 1;
     } catch (err) {
+      await deps.db.query(
+        `UPDATE inbox_events SET routing_attempts = routing_attempts + 1,
+           next_routing_attempt_at = now() + make_interval(secs => least(60, power(2, least(routing_attempts, 6))))
+         WHERE id = $1 AND routing_status = 'pending'`,
+        [row.id],
+      );
       deps.onError?.(err, row.id);
     }
   }

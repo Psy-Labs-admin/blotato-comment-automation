@@ -83,6 +83,7 @@ export function parseDefinition(input: unknown): AutomationDefinition {
         privateReplies += 1;
         break;
       case 'await_input': {
+        if (sawInput) issues.push('only one await_input per automation is supported (one captured lead per run)');
         const prev = def.steps[index - 1];
         if (!prev || prev.id !== step.promptStep || (prev.type !== 'send_private_reply' && prev.type !== 'send_message')) {
           issues.push(`step "${step.id}": promptStep must name the private reply / message step right before it`);

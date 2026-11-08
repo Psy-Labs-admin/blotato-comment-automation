@@ -39,6 +39,12 @@ describe('extractEmail', () => {
   it('rejects an address without a top-level domain', () => {
     expect(extractEmail('me@localhost').kind).toBe('none');
   });
+  it.each(['.alice@example.com', 'alice.@example.com', 'a..b@example.com', 'a@-example.com', 'a@example-.com', 'a@example.com123', 'a@@example.com', 'пользователь@example.com'])('rejects the malformed candidate %s without extracting a valid-looking substring', (text) => {
+    expect(extractEmail(text)).toEqual({ kind: 'none' });
+  });
+  it('accepts plus addressing and punctuation around the whole email', () => {
+    expect(extractEmail('Use <alice+pricing@example.com>.')).toEqual({ kind: 'valid', email: 'alice+pricing@example.com' });
+  });
 });
 
 describe('isStopCommand', () => {

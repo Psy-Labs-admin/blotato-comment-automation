@@ -30,9 +30,11 @@ export async function setRunStatus(deps: StoreDeps, i: { runId: string; status: 
  */
 export async function finalizeRun(deps: StoreDeps, i: { runId: string; outcome: RunOutcome; reason?: string }): Promise<{ conversationReleased: boolean }> {
   return withTx(deps.db, async (c) => {
+    const head = (await c.query(`SELECT conversation_id FROM automation_runs WHERE id = $1`, [i.runId])).rows[0];
+    if (!head) throw new Error(`run ${i.runId} not found`);
+    const conv = (await c.query(`SELECT * FROM conversations WHERE id = $1 FOR UPDATE`, [head.conversation_id])).rows[0];
+    // A concurrent finalizer may have completed while this transaction waited for the lock.
     const run = (await c.query(`SELECT * FROM automation_runs WHERE id = $1`, [i.runId])).rows[0];
-    if (!run) throw new Error(`run ${i.runId} not found`);
-    const conv = (await c.query(`SELECT * FROM conversations WHERE id = $1 FOR UPDATE`, [run.conversation_id])).rows[0];
     if (run.finished_at) return { conversationReleased: conv.owner_run_id !== i.runId };
 
     const now = deps.clock.now();
@@ -106,4 +108,16 @@ export async function onIntentSettled(
     idempotencyKey: `resolved:${i.intentId}:${keySuffix}`,
     payload: { runId: i.runId, signal: 'intentResolved', args: [{ intentId: i.intentId }] },
   });
+}
+
+/** Signals only wake workflows. This read recovers controls persisted across history rollover. */
+export async function readRunControl(deps: StoreDeps, i: { runId: string }): Promise<{ cancelReason: string | null }> {
+  const run = (await deps.db.query(
+    `SELECT ctl.cancel_requested, ctl.cancel_reason, cv.opted_out, cv.human_takeover
+       FROM automation_runs r JOIN run_controls ctl ON ctl.run_id = r.id
+       JOIN conversations cv ON cv.id = r.conversation_id WHERE r.id = $1`, [i.runId],
+  )).rows[0];
+  if (!run) throw new Error(`run ${i.runId} not found`);
+  return { cancelReason: run.cancel_requested ? run.cancel_reason ?? Reason.RUN_CANCELLED
+    : run.opted_out ? Reason.OPTED_OUT : run.human_takeover ? Reason.HUMAN_TAKEOVER : null };
 }

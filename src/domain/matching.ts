@@ -31,14 +31,20 @@ export type EmailExtraction =
 
 // Pragmatic format check (not RFC 5322): local@domain.tld, TLD letters only. Format validity is not
 // proof of ownership; the lead is stored as `format_valid_unverified`.
-const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
+// Capture the whole candidate first. Matching just its valid-looking substring would turn
+// "alice@example.com123" into a different address and send the link for unusable input.
+const EMAIL_CANDIDATE_RE = /[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~@-]+@[\p{L}\p{N}._-]+/gu;
+const LOCAL_PART_RE = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~+-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~+-]+)*$/;
+const DOMAIN_RE = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
 
 /** Finds exactly one distinct email address in free text; never guesses between several. */
 export function extractEmail(text: string): EmailExtraction {
-  const matches = text.normalize('NFKC').match(EMAIL_RE) ?? [];
+  const matches = text.normalize('NFKC').match(EMAIL_CANDIDATE_RE) ?? [];
   const distinct = new Map<string, string>();
-  for (const raw of matches) {
+  for (const candidate of matches) {
+    const raw = candidate.replace(/\.+$/, ''); // sentence-ending punctuation
     const at = raw.lastIndexOf('@');
+    if (raw.length > 254 || at > 64 || !LOCAL_PART_RE.test(raw.slice(0, at)) || !DOMAIN_RE.test(raw.slice(at + 1))) continue;
     const normalised = `${raw.slice(0, at)}@${raw.slice(at + 1).toLowerCase()}`;
     const key = normalised.toLowerCase();
     if (!distinct.has(key)) distinct.set(key, normalised);

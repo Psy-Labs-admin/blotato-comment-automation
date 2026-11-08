@@ -14,19 +14,28 @@ export async function prepareWait(
   deps: ActivityDeps,
   i: { runId: string; stepId: string; promptStepId: string; timeoutMs: number; maxClarifications: number },
 ): Promise<{ waitId: string }> {
-  await deps.db.query(
-    `INSERT INTO input_waits (tenant_id, run_id, step_id, prompt_step_id, conversation_id, status, timeout_ms, max_clarifications)
-     SELECT tenant_id, id, $2, $3, conversation_id, 'prepared', $4, $5 FROM automation_runs WHERE id = $1
-     ON CONFLICT (run_id, step_id) DO NOTHING`,
-    [i.runId, i.stepId, i.promptStepId, i.timeoutMs, i.maxClarifications],
-  );
-  const r = await deps.db.query(`SELECT id FROM input_waits WHERE run_id = $1 AND step_id = $2`, [i.runId, i.stepId]);
-  return { waitId: r.rows[0].id };
+  return withTx(deps.db, async (c) => {
+    await c.query(`SELECT 1 FROM conversations WHERE id = (SELECT conversation_id FROM automation_runs WHERE id = $1) FOR UPDATE`, [i.runId]);
+    await c.query(
+      `INSERT INTO input_waits (tenant_id, run_id, step_id, prompt_step_id, conversation_id, status, timeout_ms, max_clarifications, closed_at)
+       SELECT tenant_id, id, $2, $3, conversation_id,
+              CASE WHEN finished_at IS NULL THEN 'prepared' ELSE 'cancelled' END, $4, $5,
+              CASE WHEN finished_at IS NULL THEN NULL ELSE finished_at END
+         FROM automation_runs WHERE id = $1
+       ON CONFLICT (run_id, step_id) DO NOTHING`,
+      [i.runId, i.stepId, i.promptStepId, i.timeoutMs, i.maxClarifications],
+    );
+    const r = await c.query(`SELECT id FROM input_waits WHERE run_id = $1 AND step_id = $2`, [i.runId, i.stepId]);
+    return { waitId: r.rows[0].id };
+  });
 }
 
 /** The question was accepted by the platform: replies after the boundary may now be consumed. */
 export async function activateWait(deps: ActivityDeps, i: { waitId: string }): Promise<void> {
   await withTx(deps.db, async (c) => {
+    // Finalization takes the conversation lock before updating the run and its waits.
+    // Using the same order avoids a wait->run / run->wait deadlock during activation.
+    await c.query(`SELECT 1 FROM conversations WHERE id = (SELECT conversation_id FROM input_waits WHERE id = $1) FOR UPDATE`, [i.waitId]);
     const w = (await c.query(`UPDATE input_waits SET status = 'active' WHERE id = $1 AND status = 'prepared' RETURNING *`, [i.waitId])).rows[0];
     if (!w) return;
     await c.query(`UPDATE automation_runs SET status = 'waiting_input', current_step = $2, updated_at = now() WHERE id = $1 AND finished_at IS NULL`, [
@@ -81,11 +90,6 @@ export async function evaluateWait(deps: ActivityDeps, i: { waitId: string }): P
     }
     const pastDeadline = now.getTime() >= new Date(w.deadline).getTime();
 
-    // A clarification already decided but not yet confirmed sent is returned again (retry-safe),
-    // unless the deadline passed: no clarification goes out after the deadline.
-    const owed = pastDeadline ? null : await owedClarification(c, w);
-    if (owed) return { kind: 'clarify', actionNo: owed };
-
     const candidates = (
       await c.query(
         `SELECT e.id, e.text FROM inbox_events e
@@ -132,6 +136,11 @@ export async function evaluateWait(deps: ActivityDeps, i: { waitId: string }): P
       deps.onOutbox?.();
       return { kind: 'valid', leadId };
     }
+
+    // A valid answer supersedes a clarification still queued or deferred. Without one, return
+    // the same logical clarification on retry until it reaches an outcome.
+    const owed = pastDeadline ? null : await owedClarification(c, w);
+    if (owed) return { kind: 'clarify', actionNo: owed };
 
     for (const ev of candidates) await rejectInput(ev);
     if (candidates.length && !pastDeadline && w.clarifications_used < w.max_clarifications) {

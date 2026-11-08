@@ -19,7 +19,7 @@ describe('CRM outage, revoked access and alerting', () => {
 
     await h.waitFor(async () => h.alerts.received().find((t) => t.includes('CRM sync failing')), 15_000, 'CRM incident alert');
     const timeline = await h.request('GET', `/runs/${runId}/timeline`);
-    expect(timeline.body.entries.at(-1).text).toBe('CRM: waiting for retry');
+    expect(timeline.body.entries).toContainEqual(expect.objectContaining({ type: 'crm.pending', text: 'CRM: queued for synchronization' }));
 
     h.crm.setDown(false);
     await h.waitFor(async () => (await h.lead(runId!)).crm_status === 'synced', 15_000, 'lead synced');

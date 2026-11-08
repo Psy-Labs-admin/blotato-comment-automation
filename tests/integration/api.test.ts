@@ -146,6 +146,23 @@ describe('HTTP API', () => {
     expect(conv.owner_run_id).toBeNull();
   });
 
+  it('finds uncertain sends even after the owning run has finished', async () => {
+    const reviewTenant = await seedTenant(db, { name: 'uncertain-sends' });
+    await app.inject({ method: 'POST', url: '/automations', headers: as(reviewTenant.tenantId),
+      payload: { connectionId: reviewTenant.connectionId, name: 'Review', definition: pricingDefinition } });
+    const hook = await webhook(commentEvent({ accountId: reviewTenant.accountId, from: 'still_held_after_cancel' }));
+    const event = (await app.inject({ url: '/events/' + hook.json().eventId, headers: as(reviewTenant.tenantId) })).json();
+    await db.query("UPDATE automation_runs SET status = 'cancelled', finished_at = now() WHERE id = $1", [event.runId]);
+    await db.query(
+      `INSERT INTO message_intents (tenant_id, run_id, step_id, action_no, connection_id, conversation_id, kind, target, body, fingerprint, status)
+       VALUES ($1, $2, 'send_link', 1, $3, $4, 'dm', '{}', 'example', 'f', 'unknown')`,
+      [reviewTenant.tenantId, event.runId, reviewTenant.connectionId, event.conversationId],
+    );
+    const held = (await app.inject({ url: '/runs?needsReview=true', headers: as(reviewTenant.tenantId) })).json();
+    expect(held.runs).toContainEqual(expect.objectContaining({ id: event.runId, status: 'cancelled' }));
+    expect((await app.inject({ url: '/runs?needsReview=true', headers: as(other.tenantId) })).json().runs).toEqual([]);
+  });
+
   it('funnel counts by run cohort and lists suppression reasons', async () => {
     await webhook(commentEvent({ accountId: tn.accountId, from: 'to_cancel' })); // busy? no: run finished, but cooldown applies
     await webhook(commentEvent({ accountId: tn.accountId, from: 'nobody', text: 'nice post' }));

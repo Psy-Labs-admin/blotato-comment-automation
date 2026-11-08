@@ -4,7 +4,10 @@ export type Db = Pool;
 export type Tx = PoolClient;
 
 export function createPool(connectionString: string, max = 20): Pool {
-  return new Pool({ connectionString, max });
+  const pool = new Pool({ connectionString, max });
+  // A server restart removes idle connections. pg replaces them on the next checkout.
+  pool.on('error', (error: Error & { code?: string }) => console.error('Postgres idle connection closed', error.code ?? error.name));
+  return pool;
 }
 
 /**

@@ -1,3 +1,4 @@
+import type { DemoReceipts } from './receipts';
 import { sendJson, startServer } from './http';
 
 export interface FakeCrm {
@@ -9,8 +10,8 @@ export interface FakeCrm {
 }
 
 /** A CRM that upserts by idempotency key and can be switched off to simulate an outage. */
-export async function startFakeCrm(port = 0): Promise<FakeCrm> {
-  const records = new Map<string, any>();
+export async function startFakeCrm(port = 0, receipts?: DemoReceipts): Promise<FakeCrm> {
+  const records = new Map<string, any>(receipts?.read('crm'));
   let deliveries = 0;
   let down = false;
   const server = await startServer(async (req, res, body, url) => {
@@ -24,6 +25,7 @@ export async function startFakeCrm(port = 0): Promise<FakeCrm> {
       deliveries += 1;
       const key = String(req.headers['idempotency-key'] ?? '');
       if (!key) return sendJson(res, 400, { error: 'idempotency-key required' });
+      receipts?.put('crm', key, body);
       records.set(key, body);
       return sendJson(res, 200, { ok: true });
     }

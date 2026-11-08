@@ -51,6 +51,12 @@ describe('parseDefinition', () => {
     expect(() => parseDefinition(d)).toThrow(/private reply/);
   });
 
+  it('rejects a second email wait because a run captures one lead', () => {
+    const d = clone();
+    d.steps.push({ ...d.steps[2], id: 'second_email', promptStep: 'send_link' } as any);
+    expect(() => parseDefinition(d)).toThrow(/one.*await_input/);
+  });
+
   it('rejects a keyword without letters or digits, which could never match (review finding)', () => {
     const d = clone();
     (d.trigger as any).keyword = '🔥🔥';

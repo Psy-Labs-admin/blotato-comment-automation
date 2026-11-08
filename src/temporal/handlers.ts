@@ -20,11 +20,12 @@ export function temporalHandlers(o: { client: Client; db: Pool; taskQueue: strin
       const { runId } = row.payload as WorkflowStartPayload;
       const run = (
         await o.db.query(
-          `SELECT r.workflow_id, v.definition FROM automation_runs r JOIN automation_versions v ON v.id = r.version_id WHERE r.id = $1`,
+          `SELECT r.workflow_id, r.finished_at, v.definition FROM automation_runs r JOIN automation_versions v ON v.id = r.version_id WHERE r.id = $1`,
           [runId],
         )
       ).rows[0];
       if (!run) throw new Error(`run ${runId} not found`);
+      if (run.finished_at) return;
       try {
         await o.client.workflow.start<typeof commentAutomation>('commentAutomation', {
           taskQueue: o.taskQueue,
@@ -43,6 +44,7 @@ export function temporalHandlers(o: { client: Client; db: Pool; taskQueue: strin
       const { runId, signal, args } = row.payload as WorkflowSignalPayload;
       const run = (await o.db.query(`SELECT workflow_id, status, finished_at FROM automation_runs WHERE id = $1`, [runId])).rows[0];
       if (!run) throw new Error(`run ${runId} not found`);
+      if (run.finished_at) return;
       try {
         await o.client.workflow.getHandle(run.workflow_id).signal(signal, ...((args ?? []) as []));
       } catch (err) {

@@ -1,3 +1,4 @@
+import { localRequest } from '../api/loopback';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -16,6 +17,7 @@ export function sendJson(res: ServerResponse, status: number, body: unknown, hea
 /** Minimal JSON HTTP server used by the fakes (real sockets so faults are real network events). */
 export async function startServer(handler: Handler, port = 0): Promise<FakeServer> {
   const server = http.createServer((req, res) => {
+    if (!localRequest(req.headers.host, req.headers.origin)) return sendJson(res, 403, { error: 'Local requests only' });
     const chunks: Buffer[] = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', async () => {

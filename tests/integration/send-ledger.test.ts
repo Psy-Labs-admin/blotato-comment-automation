@@ -9,6 +9,7 @@ import { routeEvent } from '../../src/ingest/router';
 import { systemClock } from '../../src/domain/clock';
 import { Reason } from '../../src/domain/reasons';
 import { executeSend, reconcileIntent } from '../../src/activities/send';
+import { finalizeRun } from '../../src/activities/runs';
 import { SimulatedCrash, type ActivityDeps } from '../../src/activities/deps';
 import type { Capabilities } from '../../src/domain/types';
 
@@ -62,6 +63,31 @@ describe('send ledger and policy gate', () => {
     expect(ig.sent()[0]).toMatchObject({ kind: 'comment_reply', text: 'Sent you a DM!' });
   });
 
+  it('rechecks the messaging window after waiting for the account budget lock', async () => {
+    const { runId, tn } = await startRun();
+    const holder = await db.connect();
+    let now = new Date();
+    await holder.query('BEGIN');
+    await holder.query('SELECT id FROM social_connections WHERE id = $1 FOR NO KEY UPDATE', [tn.connectionId]);
+    const sending = executeSend({ ...deps, clock: { now: () => now } }, { runId, stepId: 'ask_email', actionNo: 1 });
+    try {
+      let waiting = false;
+      for (let i = 0; i < 100 && !waiting; i++) {
+        waiting = !!(await db.query(
+          "SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE 'SELECT external_account_id, capabilities%'",
+        )).rowCount;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+      now = new Date(now.getTime() + 8 * 86_400_000);
+    } finally {
+      await holder.query('ROLLBACK');
+      holder.release();
+    }
+    expect(await sending).toMatchObject({ status: 'blocked', reason: 'window_closed' });
+    expect(ig.sent()).toHaveLength(0);
+  });
+
   it('a lost acknowledgement becomes unknown, is never resent, and opens one incident', async () => {
     const { runId, tn } = await startRun();
     ig.pushFault({ mode: 'accept_then_drop' });
@@ -96,6 +122,10 @@ describe('send ledger and policy gate', () => {
     const first = await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 });
     expect(first).toMatchObject({ status: 'deferred', reason: Reason.PROVIDER_THROTTLED });
     expect((await intent(first.intentId)).status).toBe('pending');
+    expect(await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 })).toMatchObject({ status: 'deferred' });
+    expect((await intent(first.intentId)).attempt_count).toBe(1);
+    const due = (await intent(first.intentId)).next_attempt_at;
+    deps.clock = { now: () => new Date(due.getTime() + 1) };
     expect(await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 })).toMatchObject({ status: 'accepted' });
     expect(ig.sent()).toHaveLength(1);
     expect((await intent(first.intentId)).attempt_count).toBe(2);
@@ -113,6 +143,27 @@ describe('send ledger and policy gate', () => {
     const { runId } = await startRun();
     await db.query(`UPDATE run_controls SET cancel_requested = true, cancel_reason = 'operator' WHERE run_id = $1`, [runId]);
     expect(await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 })).toMatchObject({ status: 'cancelled' });
+    expect(ig.sent()).toHaveLength(0);
+  });
+
+  it('an activity entering after finalization cannot send a new step', async () => {
+    const { runId } = await startRun();
+    const first = await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 });
+    await finalizeRun(deps, { runId, outcome: 'failed', reason: 'activity_failed' });
+    expect(await executeSend(deps, { runId, stepId: 'ask_email', actionNo: 1 })).toMatchObject({ status: 'cancelled' });
+    expect(await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 })).toEqual(first);
+    expect(ig.sent()).toHaveLength(1);
+  });
+
+  it('zero account budget blocks even the first send in a new window', async () => {
+    const { runId } = await startRun({ capabilities: { sendsPerWindow: 0 } });
+    expect(await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 })).toMatchObject({ status: 'deferred', reason: Reason.RATE_LIMITED });
+    expect(ig.sent()).toHaveLength(0);
+  });
+
+  it('an invalid zero-duration budget window blocks before any send', async () => {
+    const { runId } = await startRun({ capabilities: { budgetWindowSeconds: 0 } });
+    expect(await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 })).toMatchObject({ status: 'blocked', reason: Reason.CAPABILITY_UNKNOWN });
     expect(ig.sent()).toHaveLength(0);
   });
 
@@ -219,6 +270,27 @@ describe('send ledger and policy gate', () => {
     expect(await intent(r.intentId)).toMatchObject({ status: 'accepted', resolved_by: 'reconciliation', provider_message_id: ig.sent()[0].id });
   });
 
+  it('lookup evidence supersedes a concurrent operator not-sent decision and wakes the run', async () => {
+    const { runId } = await startRun({ capabilities: { reconciliation: 'lookup_by_client_ref' } });
+    ig.pushFault({ mode: 'accept_then_drop' });
+    const r = await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 });
+    const racing = {
+      ...deps,
+      platform: {
+        send: deps.platform.send.bind(deps.platform),
+        lookupByClientRef: async () => {
+          await db.query(`UPDATE message_intents SET status = 'pending', current_attempt_id = NULL, resolved_by = 'operator' WHERE id = $1`, [r.intentId]);
+          return { found: true as const, providerMessageId: ig.sent()[0].id };
+        },
+      },
+    };
+    expect(await reconcileIntent(racing, { intentId: r.intentId })).toEqual({ status: 'accepted' });
+    expect(await intent(r.intentId)).toMatchObject({ status: 'accepted', resolved_by: 'reconciliation' });
+    expect(await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 })).toMatchObject({ status: 'accepted' });
+    expect(ig.sent()).toHaveLength(1);
+    expect((await db.query(`SELECT 1 FROM outbox WHERE payload->>'signal' = 'intentResolved' AND payload->'args'->0->>'intentId' = $1`, [r.intentId])).rowCount).toBe(1);
+  });
+
   it('without reconciliation support an unknown send stays unresolved', async () => {
     const { runId } = await startRun();
     ig.pushFault({ mode: 'accept_then_drop' });
@@ -237,10 +309,12 @@ describe('send ledger and policy gate', () => {
       )
     ).rows[0].id;
     ig.pushFault({ mode: 'rate_limit' });
-    await executeSend(deps, { runId, stepId: 'ask_email', actionNo: 1 });
+    const first = await executeSend(deps, { runId, stepId: 'ask_email', actionNo: 1 });
     const w1 = (await db.query(`SELECT boundary_seq, prompt_started_at, deadline FROM input_waits WHERE id = $1`, [waitId])).rows[0];
     expect(w1.boundary_seq).not.toBeNull();
     expect(w1.deadline.getTime() - w1.prompt_started_at.getTime()).toBe(60_000);
+    const due = (await intent(first.intentId)).next_attempt_at;
+    deps.clock = { now: () => new Date(due.getTime() + 1) };
     await executeSend(deps, { runId, stepId: 'ask_email', actionNo: 1 });
     const w2 = (await db.query(`SELECT deadline FROM input_waits WHERE id = $1`, [waitId])).rows[0];
     expect(w2.deadline.getTime()).toBe(w1.deadline.getTime());

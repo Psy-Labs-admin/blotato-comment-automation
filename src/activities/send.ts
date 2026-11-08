@@ -64,6 +64,7 @@ interface IntentRow {
   attempt_count: number;
   provider_message_id: string | null;
   wait_id: string | null;
+  next_attempt_at: Date | null;
 }
 
 type Reservation =
@@ -71,21 +72,22 @@ type Reservation =
   | { done: false; intent: IntentRow; attemptId: string; request: Parameters<ActivityDeps['platform']['send']>[0] };
 
 async function reserve(c: PoolClient, deps: ActivityDeps, i: { runId: string; stepId: string; actionNo: number }): Promise<Reservation> {
+  const head = (await c.query(`SELECT conversation_id FROM automation_runs WHERE id = $1`, [i.runId])).rows[0];
+  if (!head) throw new Error(`run ${i.runId} not found`);
+  const conv = (await c.query(`SELECT * FROM conversations WHERE id = $1 FOR UPDATE`, [head.conversation_id])).rows[0];
+  // Read the run and account after acquiring the lock. Finalization or an account control may
+  // have committed while this activity waited for another operation on this conversation.
   const ctx = (
     await c.query(
-      `SELECT r.tenant_id, r.conversation_id, v.definition, e.comment_id, e.occurred_at AS comment_at,
-              sc.id AS connection_id, sc.external_account_id, sc.capabilities, sc.status AS connection_status, sc.sends_paused
+      `SELECT r.tenant_id, r.conversation_id, r.finished_at, v.definition, e.comment_id, least(e.occurred_at, e.received_at) AS comment_at,
+              e.connection_id
          FROM automation_runs r
          JOIN automation_versions v ON v.id = r.version_id
          JOIN inbox_events e ON e.id = r.trigger_event_id
-         JOIN conversations cv ON cv.id = r.conversation_id
-         JOIN social_connections sc ON sc.id = cv.connection_id
         WHERE r.id = $1`,
       [i.runId],
     )
   ).rows[0];
-  if (!ctx) throw new Error(`run ${i.runId} not found`);
-  const conv = (await c.query(`SELECT * FROM conversations WHERE id = $1 FOR UPDATE`, [ctx.conversation_id])).rows[0];
 
   // Find or create the logical intent. Its content comes from the run's pinned definition version.
   const def = ctx.definition as AutomationDefinition;
@@ -126,13 +128,24 @@ async function reserve(c: PoolClient, deps: ActivityDeps, i: { runId: string; st
     if (waitId) await c.query(`UPDATE message_intents SET wait_id = $2 WHERE id = $1`, [intent.id, waitId]);
   }
 
-  const now = deps.clock.now();
   const block = async (outcome: 'blocked' | 'cancelled', reason: string, data: Record<string, unknown> = {}): Promise<Reservation> => {
     await c.query(`UPDATE message_intents SET status = $2, status_reason = $3, updated_at = now() WHERE id = $1`, [intent.id, outcome, reason]);
     await audit(c, { ...base, type: `send.${outcome}`, reason, data: { stepId: i.stepId, ...data } });
     return { done: true, result: { status: outcome, intentId: intent.id, reason } };
   };
 
+  // An activity can outlive the workflow that scheduled it. Preserve recorded outcomes above,
+  // but never reserve new effects after finalization or after ownership has changed.
+  if (ctx.finished_at) return block('cancelled', Reason.RUN_FINISHED);
+  if (conv.owner_run_id !== i.runId) return block('cancelled', Reason.CONVERSATION_OWNERSHIP_LOST);
+
+  // A pause and a new reservation must have a definite order. Hold the account lock
+  // until the reservation commits. Account budgets are shared. The lock ends before any provider I/O.
+  const account = (await c.query(
+    'SELECT external_account_id, capabilities, status, sends_paused FROM social_connections WHERE id = $1 FOR NO KEY UPDATE',
+    [ctx.connection_id],
+  )).rows[0];
+  const now = deps.clock.now();
   // A question or clarification after its wait's deadline is pointless (and confusing): never send it.
   const waitDeadline = (
     await c.query(
@@ -147,11 +160,12 @@ async function reserve(c: PoolClient, deps: ActivityDeps, i: { runId: string; st
     connectionId: intent.connection_id,
     conversationId: conv.id,
     kind: intent.kind,
-    capabilities: parseCapabilities(ctx.capabilities),
-    connectionStatus: ctx.connection_status,
-    sendsPaused: ctx.sends_paused,
+    capabilities: parseCapabilities(account.capabilities),
+    connectionStatus: account.status,
+    sendsPaused: account.sends_paused,
     conversation: conv,
     triggerCommentAt: new Date(ctx.comment_at),
+    nextAttemptAt: intent.next_attempt_at,
     now,
   });
   if (!gate.ok) {
@@ -168,7 +182,7 @@ async function reserve(c: PoolClient, deps: ActivityDeps, i: { runId: string; st
     await c.query(`INSERT INTO message_attempts (intent_id, attempt_no, started_at) VALUES ($1, $2, $3) RETURNING id`, [intent.id, attemptNo, now])
   ).rows[0].id;
   await c.query(
-    `UPDATE message_intents SET status = 'in_flight', status_reason = NULL, current_attempt_id = $2, attempt_count = $3, updated_at = now() WHERE id = $1`,
+    `UPDATE message_intents SET status = 'in_flight', status_reason = NULL, current_attempt_id = $2, attempt_count = $3, next_attempt_at = NULL, updated_at = now() WHERE id = $1`,
     [intent.id, attemptId, attemptNo],
   );
   if (waitId) {
@@ -192,7 +206,7 @@ async function reserve(c: PoolClient, deps: ActivityDeps, i: { runId: string; st
     attemptId,
     request: {
       kind: intent.kind,
-      accountId: ctx.external_account_id,
+      accountId: account.external_account_id,
       commentId: intent.target.commentId,
       recipientId: intent.target.recipientId,
       text: intent.body,
@@ -275,8 +289,8 @@ async function record(c: PoolClient, deps: ActivityDeps, reserved: IntentRow, at
     case 'not_sent':
       // Provably no effect: the same intent may be attempted again later.
       await c.query(
-        `UPDATE message_intents SET status = 'pending', status_reason = $2, current_attempt_id = NULL, updated_at = now() WHERE id = $1`,
-        [intent.id, Reason.PROVIDER_THROTTLED],
+        `UPDATE message_intents SET status = 'pending', status_reason = $2, current_attempt_id = NULL, next_attempt_at = $3, updated_at = now() WHERE id = $1`,
+        [intent.id, Reason.PROVIDER_THROTTLED, new Date(now.getTime() + out.retryAfterMs)],
       );
       await audit(c, { ...base, type: 'send.deferred', reason: Reason.PROVIDER_THROTTLED, data: { providerCode: out.code, retryAfterMs: out.retryAfterMs } });
       return { status: 'deferred', intentId: intent.id, retryAfterMs: out.retryAfterMs, reason: Reason.PROVIDER_THROTTLED };
@@ -327,7 +341,7 @@ export async function reconcileIntent(deps: ActivityDeps, i: { intentId: string 
     await c.query(`SELECT 1 FROM conversations WHERE id = $1 FOR UPDATE`, [row.conversation_id]);
     const r = await c.query(
       `UPDATE message_intents SET status = 'accepted', status_reason = NULL, provider_message_id = $2, resolved_by = 'reconciliation', updated_at = now()
-        WHERE id = $1 AND status = 'unknown'`,
+        WHERE id = $1 AND status IN ('unknown', 'pending')`,
       [row.id, providerMessageId],
     );
     if (r.rowCount) {
@@ -336,8 +350,12 @@ export async function reconcileIntent(deps: ActivityDeps, i: { intentId: string 
         type: 'send.resolved', reason: 'reconciliation', data: { providerMessageId },
       });
       await settleUnknownIncident(c, { tenantId: row.tenant_id, connectionId: row.connection_id });
+      await onIntentSettled(c, { intentId: row.id, runId: row.run_id, tenantId: row.tenant_id }, deps.clock.now(), 'reconciliation');
     }
-    return { status: 'accepted' as const };
+    const current = (await c.query(`SELECT status FROM message_intents WHERE id = $1`, [row.id])).rows[0];
+    if (current.status === 'accepted') return { status: 'accepted' as const };
+    if (current.status === 'pending') return { status: 'retry_allowed' as const };
+    return { status: 'unresolved' as const };
   });
 }
 

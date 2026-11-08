@@ -15,9 +15,14 @@ import { Reason } from '../domain/reasons';
  */
 export async function reconcileOrphans(o: { db: Pool; client: Client; clock: Clock; olderThanMs?: number; limit?: number }): Promise<number> {
   const candidates = await o.db.query(
-    `SELECT id, workflow_id FROM automation_runs
-      WHERE finished_at IS NULL AND status <> 'starting' AND updated_at <= now() - make_interval(secs => $1)
-      ORDER BY updated_at LIMIT $2`,
+    `SELECT r.id, r.workflow_id FROM automation_runs r
+      WHERE r.finished_at IS NULL AND (
+        r.status <> 'starting' OR EXISTS (
+          SELECT 1 FROM outbox o WHERE o.kind = 'workflow.start' AND o.status = 'dead'
+            AND o.payload->>'runId' = r.id::text
+        )
+      ) AND coalesce(r.workflow_checked_at, r.updated_at) <= now() - make_interval(secs => $1)
+      ORDER BY coalesce(r.workflow_checked_at, r.updated_at), r.id LIMIT $2`,
     [(o.olderThanMs ?? 5 * 60_000) / 1000, o.limit ?? 100],
   );
   let finalized = 0;
@@ -30,7 +35,10 @@ export async function reconcileOrphans(o: { db: Pool; client: Client; clock: Clo
       if (!(err instanceof WorkflowNotFoundError)) throw err;
       closed = true;
     }
-    if (!closed) continue;
+    if (!closed) {
+      await o.db.query(`UPDATE automation_runs SET workflow_checked_at = now() WHERE id = $1 AND finished_at IS NULL`, [run.id]);
+      continue;
+    }
     await finalizeRun({ db: o.db, clock: o.clock }, { runId: run.id, outcome: 'failed', reason: Reason.WORKFLOW_CLOSED });
     finalized += 1;
   }

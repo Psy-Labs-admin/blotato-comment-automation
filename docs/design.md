@@ -61,7 +61,7 @@ reply first and posting the public reply only after it is accepted, or using sof
 
 ## 3. How general is the engine, and why
 
-**Decision: a small, typed, linear step language with engine-owned branches.** It is not a graph
+**Decision: a small, typed, linear step language with engine-owned branches.** New definitions accept at most one email wait because each run captures one lead. It is not a graph
 editor and it runs no user code.
 
 ```json
@@ -333,7 +333,7 @@ The crash cases that matter are covered by tests with real sockets:
   attempt later gets Instagram's acceptance, that is authoritative evidence for **this attempt**, so
   the fenced Tx2 resolves the intent as `accepted` (`resolved_by = late_result`) and wakes the run,
   or releases the conversation of a finished one. This also covers "the operator said not sent,
-  then the acceptance arrived": the intent becomes `accepted`, so no second DM goes out. Any other
+  then the acceptance arrived before a retry was reserved": the intent becomes `accepted` and the retry is suppressed. An incorrectly authorized retry can still duplicate a DM once the second external call has started. Any other
   stale result is recorded on the attempt row only.
 
 **Resolving `unknown`** accepts only authoritative evidence:
@@ -475,7 +475,7 @@ explicitly not part of the design.
   most every 15 minutes while open, and on resolve. Each one says what broke, how many conversations,
   since when, what was done automatically and what a person must do. It goes to Telegram when
   `TELEGRAM_BOT_TOKEN` is set, otherwise to a webhook sink. **No message bodies, emails or participant
-  ids in alerts or logs.** Activities return ids, not emails, so customer data stays out of Temporal
+  ids in alerts or logs.** Activities return ids, not lead emails, so captured addresses stay out of Temporal
   history except where a step needs it.
 
 ## 13. Change management
@@ -501,12 +501,7 @@ Illustrative profile (an assumption, not Blotato data): 100k inbound events/day,
   Postgres limits. A viral post spreads across many conversations, not one row.
 - Concurrent waits ≈ new conversations/day × average wait duration. Waiting workflows cost Temporal
   storage, not worker CPU.
-- **History size.** A typical history is ~40–80 events. It grows by ~6–9 events per inbound DM
-  during a wait, and per re-check (every 10 min while waiting or blocked). It is not hard-bounded: a
-  participant sending thousands of DMs into one wait, or a send blocked for weeks, would approach
-  Temporal's limits. The mitigation is `continueAsNew` with the step index and wait ids when
-  `workflowInfo().continueAsNewSuggested`; it is not implemented. Until then the orphan reconciler
-  finalizes such a run visibly instead of losing it.
+- **History size.** At durable checkpoints the worker can continue with a fresh Temporal history. The continuation carries the current step, wait IDs, unresolved send and deferral budget. The same logical run, send ledger and absolute deadline stay in PostgreSQL. The replay and rollover suites exercise old histories, pending sends and email arriving during recovery.
 - Hot paths are indexed: pending outbox by kind/time, pending inbox, unresolved intents, audit by run.
 - Growth steps, in order of expected need: more relay/worker replicas; partition/archive
   `inbox_events` and `run_audit_events` by time with a retention policy; per-tenant fairness in the
@@ -521,11 +516,10 @@ Implemented and tested here: everything in §§2–13 except as listed below.
 - **Real Instagram adapter**: the HTTP adapter targets a fake shaped like the Graph API. The real
   integration already exists in Blotato and would sit behind the same `SocialPlatform` interface.
   Its capability values must be confirmed (§10).
-- **Auth**: tenant context is the `x-tenant-id` header, a stand-in for the product's real auth.
-- **Webhook authenticity**: assumed verified by the existing integration before normalisation.
-- **Retention / encryption at rest** for inbox text and leads is described, not implemented.
-- **OpenTelemetry tracing** is not wired. Ids (run, intent, event) are on every audit row and log line instead.
-- **Workflow replay tests** and Worker Versioning setup are described, not implemented.
-- **`continueAsNew`** for unusually long histories is described (§14), not implemented.
-- **Load testing** has not been done. The numbers in §14 are design targets.
+- **Operator authentication**: non-demo bearer tokens are bound to a tenant. The production identity provider and credential rotation belong to the host product.
+- **Webhook authenticity**: the integration verifies the original platform payload. The API verifies a timestamped HMAC over the normalized envelope.
+- **Retention and storage**: opt-in inbox redaction preserves active waits and unresolved sends. The operator must provision encrypted storage for application data and backups. Lead deletion and backup retention remain deployment policies.
+- **Tracing**: opt-in OTLP traces cover HTTP, routing, activities and relay delivery. Audit identifiers provide the lookup path for an individual conversation. See [observability](observability.md).
+- **Workflow upgrades**: a recorded pre-change Temporal history is replayed in the suite. Optional pinned Worker Deployment Versioning is exercised on a compatible Temporal dev server. See [worker upgrades](worker-upgrades.md).
+- **Load testing**: the [local benchmark](observability.md) reports measured rates and latency for a short synthetic workload. The capacity estimates in §14 remain planning assumptions.
 - **Edited comments, multiple platforms, visual builder, arbitrary graphs**: deliberately out of scope (§3).

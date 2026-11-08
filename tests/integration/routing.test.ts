@@ -28,6 +28,25 @@ describe('ingest and routing', () => {
   }
   const count = async (sql: string, params: unknown[]) => Number((await db.query(sql, params)).rows[0].n);
 
+  it('uses provider DM time without reopening the window for delayed or reordered deliveries', async () => {
+    const tn = await seedTenant(db);
+    const now = new Date('2026-11-08T12:00:00Z');
+    const ingest = async (occurredAt: string) => ingestEvent({ db, clock: { now: () => now } }, {
+      ...dmEvent({ accountId: tn.accountId, from: 'delayed', text: 'hello' }), occurredAt,
+    });
+    const lastDm = async () => (await db.query(
+      `SELECT last_inbound_dm_at FROM conversations WHERE connection_id = $1 AND participant_id = 'delayed'`,
+      [tn.connectionId],
+    )).rows[0].last_inbound_dm_at;
+    await ingest('2026-11-06T12:00:00Z');
+    expect(await lastDm()).toEqual(new Date('2026-11-06T12:00:00Z'));
+    await ingest('2026-11-08T11:00:00Z');
+    await ingest('2026-11-07T12:00:00Z');
+    expect(await lastDm()).toEqual(new Date('2026-11-08T11:00:00Z'));
+    await ingest('2026-11-09T12:00:00Z');
+    expect(await lastDm()).toEqual(now);
+  });
+
   it('delivering one comment webhook five times concurrently creates one inbox row and one run', async () => {
     const tn = await seedTenant(db);
     await createAutomation(db, tn);
@@ -164,6 +183,7 @@ describe('ingest and routing', () => {
   });
 
   it('one event that cannot be routed does not stall the sweeper for the events behind it (review finding)', async () => {
+    await routePending(deps());
     const broken = await seedTenant(db);
     const a = await createAutomation(db, broken);
     await db.query(`UPDATE automation_versions SET definition = '{}' WHERE automation_id = $1`, [a.automationId]);
@@ -171,7 +191,10 @@ describe('ingest and routing', () => {
     await createAutomation(db, healthy);
     const bad = await ingestEvent(deps(), commentEvent({ accountId: broken.accountId, from: 'poison' }));
     const good = await ingestEvent(deps(), commentEvent({ accountId: healthy.accountId, from: 'healthy' }));
-    await routePending({ ...deps(), onError: () => undefined });
+    expect(await routePending({ ...deps(), onError: () => undefined }, 1)).toBe(0);
+    const retry = (await db.query(`SELECT routing_attempts, next_routing_attempt_at > now() AS deferred FROM inbox_events WHERE id = $1`, [(bad as any).eventId])).rows[0];
+    expect(retry).toMatchObject({ routing_attempts: 1, deferred: true });
+    expect(await routePending({ ...deps(), onError: () => undefined }, 1)).toBe(1);
     const row = (await db.query(`SELECT routing_outcome FROM inbox_events WHERE id = $1`, [(good as any).eventId])).rows[0];
     expect(row.routing_outcome).toBe(Reason.STARTED);
     expect((await db.query(`SELECT routing_status FROM inbox_events WHERE id = $1`, [(bad as any).eventId])).rows[0].routing_status).toBe('pending');
