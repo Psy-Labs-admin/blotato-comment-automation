@@ -88,9 +88,15 @@ describe('durable operator notifications', () => {
         },
       },
     });
-    await relay(handler).drainOnce();
-    await due();
-    await relay(handler).drainOnce();
+    const relays = [relay(handler), relay(handler)];
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      await Promise.all(relays.map(r => r.drainOnce()));
+      const pending = (await t.db.query("SELECT count(*)::int n FROM outbox WHERE tenant_id=$1 AND kind='alert.notify' AND status='pending'", [tenant.tenantId])).rows[0].n;
+      if (pending === 0) break;
+      if (Date.now() > deadline) throw new Error('Recovered incident notifications did not settle');
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
     expect(sends).toBe(0);
     expect(
       (await t.db.query('SELECT status FROM alert_deliveries WHERE tenant_id=$1', [tenant.tenantId])).rows.map(

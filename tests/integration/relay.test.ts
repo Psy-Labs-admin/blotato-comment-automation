@@ -125,3 +125,41 @@ describe('outbox relay', () => {
     expect(await relay.drainOnce()).toBe(0);
   });
 });
+
+describe('alert claim ordering', () => {
+  let data: Awaited<ReturnType<typeof createTestDb>>;
+  beforeAll(async () => { data = await createTestDb(); });
+  afterAll(async () => data?.drop());
+  it('blocks only later alerts for the same tenant/incident across backoff and concurrent claims', async () => {
+    const a = (await data.db.query("INSERT INTO tenants(name) VALUES('isolated-a') RETURNING id")).rows[0].id;
+    const b = (await data.db.query("INSERT INTO tenants(name) VALUES('isolated-b') RETURNING id")).rows[0].id;
+    async function add(tenant: string, incidentId: string, label: string, delayed = false) {
+      await withTx(data.db, c => enqueueOutbox(c, { tenantId: tenant, kind: 'alert.notify', idempotencyKey: label, payload: { incidentId, kind: 'opened' } }));
+      if (delayed) await data.db.query("UPDATE outbox SET next_attempt_at=now()+interval '1 minute' WHERE idempotency_key=$1", [label]);
+    }
+    await add(a, 'incident-one', 'first', true);
+    await add(a, 'incident-one', 'later');
+    await add(a, 'incident-two', 'other-incident');
+    await add(b, 'incident-one', 'other-tenant');
+    const seen: string[] = [];
+    let release!: () => void; let enter!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const handler = async (r: OutboxRow) => {
+      seen.push(r.idempotencyKey);
+      if (r.idempotencyKey === 'first') { enter(); await blocked; }
+    };
+    const make = () => new OutboxRelay({ db: data.db, kinds: ['alert.notify'], handlers: { 'alert.notify': handler } });
+    expect(await make().drainOnce()).toBe(2);
+    expect(seen.sort()).toEqual(['other-incident', 'other-tenant']);
+    expect(await make().drainOnce()).toBe(0);
+    await data.db.query("UPDATE outbox SET next_attempt_at=now() WHERE idempotency_key='first'");
+    const first = make().drainOnce(); await entered;
+    try {
+      expect(await make().drainOnce()).toBe(0);
+      expect(seen).not.toContain('later');
+    } finally { release(); await first; }
+    expect(await make().drainOnce()).toBe(1);
+    expect(seen.at(-1)).toBe('later');
+  });
+});

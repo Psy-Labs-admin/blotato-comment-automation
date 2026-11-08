@@ -59,10 +59,16 @@ export class OutboxRelay {
     const claimToken = randomUUID();
     const rows = await withTx(db, async (c) => {
       const r = await c.query(
-        `SELECT id, tenant_id, kind, idempotency_key, payload, attempts FROM outbox
-          WHERE status = 'pending' AND kind = ANY($1) AND next_attempt_at <= now()
-            AND (locked_until IS NULL OR locked_until < now())
-          ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED`,
+        `SELECT o.id, o.tenant_id, o.kind, o.idempotency_key, o.payload, o.attempts FROM outbox o
+          WHERE o.status = 'pending' AND o.kind = ANY($1) AND o.next_attempt_at <= now()
+            AND (o.locked_until IS NULL OR o.locked_until < now())
+            AND (o.kind <> 'alert.notify' OR NOT EXISTS (
+              SELECT 1 FROM outbox earlier
+               WHERE earlier.kind='alert.notify' AND earlier.status='pending'
+                 AND earlier.tenant_id=o.tenant_id
+                 AND earlier.payload->>'incidentId'=o.payload->>'incidentId' AND earlier.id<o.id
+            ))
+          ORDER BY o.id LIMIT $2 FOR UPDATE OF o SKIP LOCKED`,
         [kinds, this.o.batchSize ?? 20],
       );
       if (r.rowCount) {
