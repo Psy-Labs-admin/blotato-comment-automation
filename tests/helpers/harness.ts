@@ -20,7 +20,8 @@ import { routeEvent } from '../../src/ingest/router';
 import { OutboxRelay } from '../../src/relay/relay';
 import { temporalHandlers } from '../../src/temporal/handlers';
 import { integrationHandlers, onDeadLetter } from '../../src/relay/integrations';
-import { startWorker, type RunningWorker } from '../../src/temporal/worker';
+import type { RunningWorker } from '../../src/temporal/worker';
+import { startTestWorker as startWorker } from './workflow-coverage';
 import type { ActivityDeps, CrashHooks } from '../../src/activities/deps';
 import { buildServer } from '../../src/api/server';
 

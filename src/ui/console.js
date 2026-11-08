@@ -18,6 +18,16 @@
   let conversationCursor = null;
   let conversationRows = [];
   let resolutionIntentId = null;
+  let operationsTab = "open";
+  let incidentRows = [];
+  let incidentCursor = null;
+  let deliveryRows = [];
+  let deliveryCursor = null;
+  let deliveryStatus = "dead";
+  let deliveryKind = "";
+  let retryDelivery = null;
+  let operationsFingerprint = null;
+  let operationsChecking = false;
   let instagramFeedback = consumeInstagramFeedback();
 
   const dateFormat = new Intl.DateTimeFormat(undefined, {
@@ -145,6 +155,8 @@
   function showSignIn(text = "") {
     workspace = null;
     requestVersion++;
+    byId("retry-dialog").close();
+    byId("resolve-dialog").close();
     byId("sign-in").hidden = false;
     byId("navigation").hidden = true;
     byId("workspace-session").hidden = true;
@@ -179,7 +191,8 @@
   function empty(title, text, action, inline = false) {
     const surface = node("div", undefined, "surface");
     const body = node("div", undefined, "empty" + (inline ? " inline" : ""));
-    body.append(node("h2", title), node("p", text));
+    body.append(node("h2", title));
+    if (text) body.append(node("p", text));
     if (action) body.append(action);
     surface.append(body);
     return surface;
@@ -212,6 +225,7 @@
       automations: "Automations",
       conversations: "Conversations",
       accounts: "Accounts",
+      operations: "Operations",
     };
     document.title = titles[view] + " · Blotato";
   }
@@ -293,7 +307,9 @@
         ? "conversations"
         : hash === "#accounts"
           ? "accounts"
-          : "automations",
+          : hash === "#operations" || params.has("incident")
+            ? "operations"
+            : "automations",
     );
     try {
       await commonData();
@@ -304,21 +320,44 @@
         await openAutomation(params.get("automation"), version);
       else if (hash === "#conversations") await showConversations(version);
       else if (hash === "#accounts") showAccounts();
+      else if (params.has("incident"))
+        await showIncident(params.get("incident"), version);
+      else if (hash === "#operations") await showOperations(version);
       else await showAutomations(version);
     } catch (error) {
       if (version !== requestVersion || !workspace) return;
       if (error.status === 404) {
         const conversation = params.has("run");
+        const incident = params.has("incident");
         content.replaceChildren(
-          heading(conversation ? "Conversations" : "Automations"),
+          heading(
+            incident
+              ? "Operations"
+              : conversation
+                ? "Conversations"
+                : "Automations",
+          ),
           empty(
-            conversation
-              ? "Conversation unavailable"
-              : "Automation unavailable",
+            incident
+              ? "Incident unavailable"
+              : conversation
+                ? "Conversation unavailable"
+                : "Automation unavailable",
             "This item is no longer in this workspace.",
             button(
-              conversation ? "View conversations" : "View automations",
-              () => go(conversation ? "#conversations" : "#automations"),
+              incident
+                ? "View operations"
+                : conversation
+                  ? "View conversations"
+                  : "View automations",
+              () =>
+                go(
+                  incident
+                    ? "#operations"
+                    : conversation
+                      ? "#conversations"
+                      : "#automations",
+                ),
             ),
           ),
         );
@@ -333,6 +372,747 @@
         );
       }
     }
+  }
+
+  function operationTime(value, fallback = "Not recorded") {
+    return value ? date(value) : fallback;
+  }
+
+  function operationStatus(state) {
+    const labels = {
+      ready: "Running",
+      attention: "Needs attention",
+      disabled: "Not configured",
+      stale: "Stopped reporting",
+      missing: "Not reporting",
+      degraded: "Needs attention",
+    };
+    return labels[state] || "Not reporting";
+  }
+
+  function operationsTabs() {
+    const filters = node("div", undefined, "filters");
+    filters.setAttribute("aria-label", "Operations views");
+    for (const [value, label] of [
+      ["open", "Open incidents"],
+      ["resolved", "Incident history"],
+      ["deliveries", "Delivery queue"],
+    ]) {
+      const control = button(
+        label,
+        () => {
+          operationsTab = value;
+          incidentCursor = null;
+          deliveryCursor = null;
+          showRoute();
+        },
+        "filter",
+      );
+      control.setAttribute("aria-pressed", String(operationsTab === value));
+      filters.append(control);
+    }
+    return filters;
+  }
+
+  function systemSummary(summary) {
+    const section = node("section", undefined, "operation-health surface");
+    section.setAttribute("aria-label", "Processing and notifications");
+    const pipeline = summary.pipeline;
+    const title =
+      pipeline.state === "ready"
+        ? "Processing is running"
+        : pipeline.state === "disabled"
+          ? "Message delivery is not configured"
+          : "Processing needs attention";
+    const intro = node("div", undefined, "operation-health-intro");
+    intro.append(node("h2", title));
+    if (pipeline.state === "disabled") {
+      intro.append(
+        node(
+          "p",
+          accounts.some(accountReady)
+            ? "Ask your administrator to configure message processing before publishing automations."
+            : "Connect Instagram and configure processing before publishing automations.",
+        ),
+        link("Open accounts →", "#accounts", "empty-link"),
+      );
+    } else if (pipeline.state === "attention") {
+      intro.append(
+        node(
+          "p",
+          pipeline.missingConsumers?.length
+            ? "Some delivery senders are unavailable. Check processing details before retrying deliveries."
+            : "Review the incidents below and check processing details for the affected service.",
+        ),
+      );
+    } else intro.append(node("p", "Checked " + operationTime(summary.asOf)));
+    section.append(intro);
+    const details = node("details", undefined, "operation-details");
+    details.append(node("summary", "Processing details"));
+    const roles = node("dl", undefined, "operation-facts");
+    const names = {
+      worker: "Automation execution",
+      relay: "Background delivery",
+    };
+    for (const role of pipeline.roles || []) {
+      const item = node("div");
+      const text =
+        operationStatus(role.state) +
+        (role.lastSeenAt ? " · Last seen " + date(role.lastSeenAt) : "");
+      item.append(
+        node("dt", names[role.role] || "Processing"),
+        node("dd", text),
+      );
+      roles.append(item);
+    }
+    const notifications = summary.notifications;
+    const channel =
+      notifications.channel === "telegram"
+        ? "Telegram"
+        : notifications.channel === "webhook"
+          ? "Webhook"
+          : "Notifications";
+    const channelRow = node("div");
+    channelRow.append(node("dt", channel));
+    const channelState = [
+      !notifications.configured
+        ? "Not configured"
+        : !notifications.observed
+          ? "Notification sender unavailable"
+          : "Sender available",
+      notifications.failed
+        ? plural(notifications.failed, "notification") + " need attention"
+        : null,
+      notifications.pending
+        ? plural(notifications.pending, "notification") + " waiting"
+        : null,
+      notifications.lastAcceptedAt
+        ? "Last accepted " + date(notifications.lastAcceptedAt)
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    channelRow.append(node("dd", channelState));
+    roles.append(channelRow);
+    if (notifications.lastAttemptAt) {
+      const attempt = node("div");
+      const outcomes = {
+        accepted: "Accepted by the notification service",
+        unknown: "Delivery outcome unconfirmed",
+        rejected: "Not accepted by the notification service",
+        failed: "Delivery failed",
+        retryable: "A new attempt is scheduled",
+        permanent: "Delivery stopped and needs attention",
+        not_sent: "Not sent",
+        skipped: "Not sent",
+        unconfigured: "Not configured",
+      };
+      attempt.append(
+        node("dt", "Last notification attempt"),
+        node(
+          "dd",
+          operationTime(notifications.lastAttemptAt) +
+            (notifications.lastOutcome
+              ? " · " + (outcomes[notifications.lastOutcome] || "Needs review")
+              : ""),
+        ),
+      );
+      roles.append(attempt);
+    }
+    details.append(roles);
+    if (notifications.lastErrorCode) {
+      const actions = {
+        telegram_rate_limited:
+          "Telegram has limited requests. Delivery will wait before another attempt.",
+        telegram_chat_forbidden:
+          "Add the bot to the destination and allow it to send messages.",
+        telegram_token_rejected:
+          "Replace the Telegram bot token in the deployment settings.",
+        telegram_request_rejected:
+          "Check the Telegram destination and deployment settings.",
+        telegram_configuration_invalid:
+          "Check the Telegram deployment settings.",
+        telegram_endpoint_invalid:
+          "Check the notification endpoint in deployment settings.",
+        telegram_connection_unknown:
+          "Telegram may have accepted the notification. Check the destination before taking further action.",
+        telegram_service_unavailable:
+          "The notification service is unavailable. Check the destination for a possible delivery.",
+        telegram_response_invalid:
+          "The notification service did not confirm a delivery outcome.",
+        telegram_confirmation_invalid:
+          "The notification service did not confirm a delivery outcome.",
+        alert_delivery_unconfigured:
+          "Configure a notification channel in the deployment settings.",
+        alert_obsolete:
+          "The incident recovered before its first notification was sent.",
+      };
+      if (actions[notifications.lastErrorCode])
+        details.append(
+          node(
+            "p",
+            actions[notifications.lastErrorCode],
+            "notification-guidance",
+          ),
+        );
+    }
+    const queues = node("div", undefined, "operation-queues");
+    for (const queue of summary.queues || []) {
+      const row = node("div", undefined, "operation-queue-row");
+      const availability = !queue.configured
+        ? "Not configured"
+        : queue.state !== "ready" || !queue.observed
+          ? "Sender unavailable"
+          : "Sender available";
+      const counts = [
+        queue.dead
+          ? plural(queue.dead, "failed delivery", "failed deliveries")
+          : null,
+        queue.pending
+          ? plural(queue.pending, "delivery", "deliveries") + " waiting"
+          : null,
+        queue.inFlight
+          ? plural(queue.inFlight, "delivery", "deliveries") + " in progress"
+          : null,
+      ].filter(Boolean);
+      const text =
+        availability +
+        (counts.length
+          ? " · " + counts.join(" · ")
+          : queue.observed && queue.state === "ready"
+            ? " · Queue clear"
+            : " · No queued deliveries");
+      row.append(node("strong", queue.label), node("span", text));
+      if (queue.oldestPendingAt && queue.pending)
+        row.append(
+          node("small", "Oldest waiting since " + date(queue.oldestPendingAt)),
+        );
+      queues.append(row);
+    }
+    details.append(queues);
+    section.append(details);
+    return section;
+  }
+
+  async function showOperations(version, older = false) {
+    const params = new URLSearchParams({ limit: "20" });
+    const deliveries = operationsTab === "deliveries";
+    if (deliveries) {
+      params.set("status", deliveryStatus);
+      if (deliveryKind) params.set("kind", deliveryKind);
+      if (older && deliveryCursor) params.set("cursor", deliveryCursor);
+    } else {
+      params.set("status", operationsTab);
+      if (older && incidentCursor) params.set("cursor", incidentCursor);
+    }
+    const [summary, result] = await Promise.all([
+      api("/operator/operations"),
+      api(
+        (deliveries ? "/operator/deliveries?" : "/operator/incidents?") +
+          params,
+      ),
+    ]);
+    if (version !== requestVersion) return;
+    const refresh = node("div", undefined, "operations-refresh");
+    refresh.append(
+      node("span", "Updated " + operationTime(summary.asOf)),
+      button("Refresh", () => showRoute()),
+    );
+    content.replaceChildren(heading("Operations", refresh));
+    const failedDeliveries = summary.queues.reduce(
+      (total, queue) => total + queue.dead,
+      0,
+    );
+    if (
+      summary.incidents.open ||
+      summary.pipeline.unknownSends ||
+      failedDeliveries
+    ) {
+      content.append(
+        metrics([
+          ["Open incidents", summary.incidents.open, true],
+          ["Messages to review", summary.pipeline.unknownSends],
+          ["Failed deliveries", failedDeliveries],
+        ]),
+      );
+    }
+    const updateNotice = node("div", undefined, "operation-update-notice");
+    updateNotice.id = "operations-updates";
+    updateNotice.hidden = true;
+    updateNotice.setAttribute("role", "status");
+    content.append(updateNotice, operationsTabs());
+    if (deliveries) {
+      deliveryRows = older
+        ? Array.from(
+            new Map(
+              [...deliveryRows, ...result.deliveries].map((item) => [
+                item.id,
+                item,
+              ]),
+            ).values(),
+          )
+        : result.deliveries;
+      deliveryCursor = result.nextCursor;
+      renderDeliveryQueue(deliveryRows, summary);
+      if (deliveryCursor)
+        content.append(
+          button(
+            "Load earlier deliveries",
+            () => loadMoreOperations(version),
+            "button secondary load-more",
+          ),
+        );
+    } else {
+      incidentRows = older
+        ? Array.from(
+            new Map(
+              [...incidentRows, ...result.incidents].map((item) => [
+                item.id,
+                item,
+              ]),
+            ).values(),
+          )
+        : result.incidents;
+      incidentCursor = result.nextCursor;
+      renderIncidents(incidentRows);
+      if (incidentCursor)
+        content.append(
+          button(
+            "Load earlier incidents",
+            () => loadMoreOperations(version),
+            "button secondary load-more",
+          ),
+        );
+    }
+    operationsFingerprint = operationsSignature(
+      summary,
+      deliveries ? deliveryRows.slice(0, 20) : incidentRows.slice(0, 20),
+    );
+    content.append(systemSummary(summary));
+  }
+
+  function operationsSignature(summary, rows) {
+    return JSON.stringify({
+      tab: operationsTab,
+      status: deliveryStatus,
+      kind: deliveryKind,
+      incidents: summary.incidents,
+      pipelineState: summary.pipeline.state,
+      missingConsumers: summary.pipeline.missingConsumers,
+      unknown: summary.pipeline.unknownSends,
+      unrouted: summary.pipeline.unroutedEvents,
+      roles: summary.pipeline.roles.map((role) => [
+        role.role,
+        role.state,
+        role.instances,
+      ]),
+      queues: summary.queues.map((queue) => [
+        queue.kind,
+        queue.configured,
+        queue.expected,
+        queue.observed,
+        queue.state,
+        queue.pending,
+        queue.dead,
+        queue.inFlight,
+      ]),
+      notifications: [
+        summary.notifications.configured,
+        summary.notifications.expected,
+        summary.notifications.observed,
+        summary.notifications.channel,
+        summary.notifications.lastErrorCode,
+        summary.notifications.lastAcceptedAt,
+        summary.notifications.pending,
+        summary.notifications.failed,
+        summary.notifications.lastAttemptAt,
+        summary.notifications.lastOutcome,
+      ],
+      rows: rows.map((row) => [
+        row.id,
+        row.status,
+        row.generation,
+        row.lastSeenAt,
+        row.resolvedAt,
+      ]),
+    });
+  }
+
+  async function checkOperationsUpdate() {
+    if (
+      !workspace ||
+      location.hash !== "#operations" ||
+      document.visibilityState !== "visible" ||
+      operationsChecking ||
+      byId("retry-dialog").open ||
+      !operationsFingerprint
+    )
+      return;
+    const version = requestVersion;
+    operationsChecking = true;
+    try {
+      const deliveries = operationsTab === "deliveries";
+      const params = new URLSearchParams({
+        limit: "20",
+        status: deliveries ? deliveryStatus : operationsTab,
+      });
+      if (deliveries && deliveryKind) params.set("kind", deliveryKind);
+      const [summary, result] = await Promise.all([
+        api("/operator/operations"),
+        api(
+          (deliveries ? "/operator/deliveries?" : "/operator/incidents?") +
+            params,
+        ),
+      ]);
+      if (version !== requestVersion || !workspace) return;
+      const changed =
+        operationsSignature(
+          summary,
+          deliveries ? result.deliveries : result.incidents,
+        ) !== operationsFingerprint;
+      const notice = byId("operations-updates");
+      if (changed && notice) {
+        notice.replaceChildren(
+          node("span", "New operational activity is available."),
+          button(
+            "Refresh operations",
+            () => showRoute(),
+            "button secondary small",
+          ),
+        );
+        notice.hidden = false;
+      }
+    } catch (error) {
+      const notice = byId("operations-updates");
+      if (version === requestVersion && workspace && notice) {
+        notice.replaceChildren(
+          node("span", "Updates could not be checked."),
+          button(
+            "Refresh operations",
+            () => showRoute(),
+            "button secondary small",
+          ),
+        );
+        notice.hidden = false;
+      }
+    } finally {
+      operationsChecking = false;
+    }
+  }
+
+  async function loadMoreOperations(version) {
+    try {
+      await showOperations(version, true);
+    } catch (error) {
+      if (version === requestVersion) message("app-error", error.message);
+    }
+  }
+
+  function renderIncidents(incidents) {
+    if (!incidents.length) {
+      content.append(
+        empty(
+          operationsTab === "resolved"
+            ? "No resolved incidents"
+            : "No open incidents",
+          "",
+          undefined,
+          true,
+        ),
+      );
+      return;
+    }
+    const list = node("section", undefined, "surface");
+    list.setAttribute(
+      "aria-label",
+      operationsTab === "resolved" ? "Resolved incidents" : "Open incidents",
+    );
+    for (const incident of incidents) {
+      const row = button(
+        "",
+        () => go("#incident=" + encodeURIComponent(incident.id)),
+        "incident-row",
+      );
+      const body = node("div");
+      body.append(
+        node("strong", incident.title, "row-title"),
+        node("span", incident.nextAction, "row-subtitle"),
+      );
+      const scope = node(
+        "span",
+        incident.affectedConversations
+          ? plural(incident.affectedConversations, "conversation")
+          : "Service incident",
+        "incident-scope",
+      );
+      const time = node(
+        "span",
+        incident.status === "resolved"
+          ? "Resolved " + operationTime(incident.resolvedAt)
+          : "Since " + operationTime(incident.firstSeenAt),
+        "incident-time",
+      );
+      row.append(body, scope, time, node("span", "→", "row-arrow"));
+      list.append(row);
+    }
+    content.append(list);
+  }
+
+  function deliveryUnavailable(reason) {
+    const reasons = {
+      not_dead: "This delivery is already queued or complete.",
+      unsupported_kind: "This delivery is managed automatically.",
+      kind_not_retryable: "This delivery cannot be retried here.",
+      integration_unconfigured: "Configure this integration before retrying.",
+      target_missing: "The original record is no longer available.",
+      missing_target: "The original record is no longer available.",
+      superseded: "A newer delivery has replaced this one.",
+    };
+    return (
+      reasons[reason] ||
+      (typeof reason === "string" && reason.includes(" ")
+        ? reason
+        : "This delivery cannot be retried here.")
+    );
+  }
+
+  function deliveryName(delivery) {
+    const names = {
+      "crm.lead_captured": "CRM sync",
+      "metadata.hydrate": "Post details",
+      "alert.notify": "Operational notification",
+      "workflow.start": "Conversation start",
+      "workflow.signal": "Conversation update",
+    };
+    return names[delivery.kind] || delivery.label;
+  }
+
+  function deliveryRow(delivery) {
+    const row = node("div", undefined, "delivery-row");
+    const body = node("div");
+    body.append(node("strong", delivery.label, "row-title"));
+    let description =
+      delivery.status === "dead"
+        ? "Stopped after " + plural(delivery.attempts, "attempt")
+        : delivery.nextAttemptAt
+          ? "Next attempt " + date(delivery.nextAttemptAt)
+          : "Waiting to be processed";
+    body.append(node("span", description, "row-subtitle"));
+    const action = node("div", undefined, "delivery-action");
+    if (delivery.canRetry) {
+      const retry = button(
+        "Retry delivery",
+        () => openDeliveryRetry(delivery),
+        "button secondary small",
+      );
+      retry.setAttribute("aria-label", "Retry " + deliveryName(delivery));
+      action.append(retry);
+    } else if (delivery.status === "dead")
+      action.append(
+        node(
+          "span",
+          deliveryUnavailable(delivery.retryUnavailableReason),
+          "field-help",
+        ),
+      );
+    if (delivery.incidentId)
+      action.append(
+        link(
+          "View incident",
+          "#incident=" + encodeURIComponent(delivery.incidentId),
+          "empty-link",
+        ),
+      );
+    row.append(
+      body,
+      node(
+        "span",
+        operationTime(delivery.finishedAt || delivery.createdAt),
+        "delivery-time",
+      ),
+      action,
+    );
+    return row;
+  }
+
+  function renderDeliveryQueue(deliveries, summary) {
+    const controls = node("div", undefined, "delivery-filters");
+    const stateField = node("div");
+    const stateLabel = node("label", "Show");
+    stateLabel.htmlFor = "delivery-status";
+    const states = node("select");
+    states.id = "delivery-status";
+    for (const [value, label] of [
+      ["dead", "Failed deliveries"],
+      ["pending", "Waiting deliveries"],
+    ]) {
+      const option = node("option", label);
+      option.value = value;
+      states.append(option);
+    }
+    states.value = deliveryStatus;
+    states.addEventListener("change", () => {
+      deliveryStatus = states.value;
+      deliveryCursor = null;
+      showRoute();
+    });
+    stateField.append(stateLabel, states);
+    const kindField = node("div");
+    const kindLabel = node("label", "Integration");
+    kindLabel.htmlFor = "delivery-kind";
+    const kinds = node("select");
+    kinds.id = "delivery-kind";
+    const all = node("option", "All integrations");
+    all.value = "";
+    kinds.append(all);
+    for (const queue of summary.queues) {
+      const option = node("option", queue.label);
+      option.value = queue.kind;
+      kinds.append(option);
+    }
+    kinds.value = deliveryKind;
+    kinds.addEventListener("change", () => {
+      deliveryKind = kinds.value;
+      deliveryCursor = null;
+      showRoute();
+    });
+    kindField.append(kindLabel, kinds);
+    controls.append(stateField, kindField);
+    content.append(controls);
+    if (!deliveries.length) {
+      content.append(
+        empty(
+          deliveryStatus === "dead"
+            ? "No failed deliveries"
+            : "No waiting deliveries",
+          "",
+          undefined,
+          true,
+        ),
+      );
+      return;
+    }
+    const list = node("section", undefined, "surface");
+    list.setAttribute("aria-label", "Background deliveries");
+    for (const delivery of deliveries) list.append(deliveryRow(delivery));
+    content.append(list);
+  }
+
+  async function showIncident(id, version) {
+    const result = await api("/operator/incidents/" + encodeURIComponent(id));
+    if (version !== requestVersion) return;
+    const incident = result.incident;
+    content.replaceChildren(link("← Operations", "#operations", "back-link"));
+    const title = heading(incident.title);
+    title.append(
+      status(incident.status === "resolved" ? "Resolved" : "Needs attention"),
+    );
+    content.append(title);
+    if (incident.status === "open") {
+      const action = node("section", undefined, "review-action");
+      action.append(node("h2", "Next action"), node("p", incident.nextAction));
+      if (incident.type === "connection_unauthorized")
+        action.append(link("Open accounts", "#accounts", "button secondary"));
+      else if (
+        ["crm_delivery_failing", "outbox_dead_letter"].includes(incident.type)
+      )
+        action.append(
+          button(
+            "Review failed deliveries",
+            () => {
+              operationsTab = "deliveries";
+              deliveryStatus = "dead";
+              deliveryKind =
+                incident.type === "crm_delivery_failing"
+                  ? "crm.lead_captured"
+                  : "";
+              deliveryCursor = null;
+              go("#operations");
+            },
+            "button secondary",
+          ),
+        );
+      else if (incident.runIds?.length)
+        action.append(
+          link(
+            "Open affected conversation",
+            "#run=" + encodeURIComponent(incident.runIds[0]),
+            "button secondary",
+          ),
+        );
+      content.append(action);
+    }
+    const layout = node("div", undefined, "detail-layout");
+    const history = node("ol", undefined, "timeline surface");
+    history.setAttribute("aria-label", "Incident history");
+    for (const entry of result.history || []) {
+      const item = node("li");
+      const time = node("time", date(entry.at));
+      time.dateTime = entry.at;
+      item.append(node("p", entry.text), time);
+      history.append(item);
+    }
+    const facts = node("dl", undefined, "detail-facts");
+    for (const [label, value] of [
+      ["First recorded", operationTime(incident.firstSeenAt)],
+      ["Last recorded", operationTime(incident.lastSeenAt)],
+      [
+        "Affected conversations",
+        numberFormat.format(incident.affectedConversations),
+      ],
+      ["Occurrences", numberFormat.format(incident.occurrences)],
+    ]) {
+      const row = node("div");
+      row.append(node("dt", label), node("dd", value));
+      facts.append(row);
+    }
+    if (incident.resolvedAt) {
+      const row = node("div");
+      row.append(node("dt", "Resolved"), node("dd", date(incident.resolvedAt)));
+      facts.append(row);
+    }
+    layout.append(history, facts);
+    content.append(layout);
+    if (result.deliveries?.length) {
+      const heading = node(
+        "div",
+        undefined,
+        "section-heading related-deliveries",
+      );
+      heading.append(node("h2", "Related deliveries"));
+      content.append(heading);
+      const deliveries = node("section", undefined, "surface");
+      deliveries.setAttribute("aria-label", "Related deliveries");
+      for (const delivery of result.deliveries)
+        deliveries.append(deliveryRow(delivery));
+      content.append(deliveries);
+    }
+    const technical = node("details", undefined, "diagnostics");
+    technical.append(
+      node("summary", "Technical details"),
+      node(
+        "pre",
+        JSON.stringify(
+          {
+            incidentId: incident.id,
+            type: incident.type,
+            connectionId: incident.connectionId,
+          },
+          null,
+          2,
+        ),
+      ),
+    );
+    content.append(technical);
+  }
+
+  function openDeliveryRetry(delivery) {
+    retryDelivery = delivery;
+    byId("retry-form").reset();
+    byId("retry-title").textContent = "Retry " + deliveryName(delivery);
+    message("retry-error", "");
+    byId("retry-dialog").showModal();
+    byId("retry-note").focus();
   }
 
   async function showAutomations(version) {
@@ -871,13 +1651,16 @@
           details.append(
             node("p", "Connection verified " + date(account.verifiedAt)),
           );
-        const state = accountReady(account)
-          ? "Connected"
-          : account.paused
-            ? "Paused"
+        const state =
+          account.status === "disconnected"
+            ? "Disconnected"
             : account.status === "unauthorized"
               ? "Reconnect required"
-              : "Not connected";
+              : account.paused
+                ? "Paused"
+                : accountReady(account)
+                  ? "Connected"
+                  : "Not connected";
         const action = node("div", undefined, "account-actions");
         action.append(node("span", state, "account-state"));
         if (
@@ -1265,6 +2048,50 @@
     byId("resolve-dialog").showModal();
   }
 
+  byId("close-retry").addEventListener("click", () =>
+    byId("retry-dialog").close(),
+  );
+  byId("retry-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const delivery = retryDelivery;
+    const note = byId("retry-note").value.trim();
+    if (!delivery || !note) {
+      message("retry-error", "Add a reason for retrying this delivery.");
+      return;
+    }
+    const version = requestVersion;
+    byId("submit-retry").disabled = true;
+    message("retry-error", "");
+    try {
+      await api(
+        "/operator/deliveries/" + encodeURIComponent(delivery.id) + "/retry",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            expectedGeneration: delivery.generation,
+            note,
+          }),
+        },
+      );
+      byId("retry-dialog").close();
+      if (version !== requestVersion || !workspace) return;
+      await showRoute();
+      message(
+        "app-notice",
+        deliveryName(delivery) + " returned to the delivery queue.",
+      );
+    } catch (error) {
+      message(
+        "retry-error",
+        error.status === 409
+          ? "This delivery changed. Close this dialog and refresh the queue before retrying."
+          : error.message,
+      );
+    } finally {
+      byId("submit-retry").disabled = false;
+    }
+  });
+
   byId("sign-in-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     byId("sign-in-submit").disabled = true;
@@ -1348,6 +2175,7 @@
   window.addEventListener("beforeunload", (event) => {
     if (editorDirty) event.preventDefault();
   });
+  window.setInterval(checkOperationsUpdate, 15_000);
   openWorkspace().catch((error) => {
     if (error.status === 401) showSignIn();
     else {

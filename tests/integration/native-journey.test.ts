@@ -14,7 +14,8 @@ import { integrationHandlers, onDeadLetter } from '../../src/relay/integrations'
 import { OutboxRelay } from '../../src/relay/relay';
 import { createTenant } from '../../src/storage/admin';
 import { temporalHandlers } from '../../src/temporal/handlers';
-import { startWorker, type RunningWorker } from '../../src/temporal/worker';
+import type { RunningWorker } from '../../src/temporal/worker';
+import { startTestWorker as startWorker } from '../helpers/workflow-coverage';
 import { createTestDb } from '../helpers/db';
 import { createTestAccess } from '../helpers/test-access';
 

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool } from 'pg';
@@ -15,19 +17,7 @@ const ticket = z.object({ ticket: z.string().regex(/^[a-f0-9]{64}$/) });
 type Principal = { tenantId: string; credential: string; csrf?: string; sessionHash?: string };
 
 const exchangePage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · Blotato</title><link rel="stylesheet" href="/console.css"><script src="/session/enter.js" defer></script></head><body><main><h1>Sign in</h1><p id="message" role="status">Opening your workspace…</p><a href="/console">Go to sign in</a></main></body></html>`;
-const exchangeScript = `
-const ticket = new URLSearchParams(location.hash.slice(1)).get('ticket');
-history.replaceState(null, '', '/session/enter');
-(async () => {
-  if (!ticket) throw new Error();
-  const response = await fetch('/session/exchange', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ticket}), credentials: 'same-origin', redirect: 'error'
-  });
-  if (!response.ok) throw new Error();
-  location.replace('/console');
-})().catch(() => { document.getElementById('message').textContent = 'This sign-in link has expired. Open a new link or sign in with your access token.'; });
-`;
+const exchangeScript = readFileSync(join(__dirname, '../ui/enter.js'), 'utf8');
 
 /** Browser sessions do not expose the operator bearer token. API clients can continue to use it directly. */
 export function registerSessions(app: FastifyInstance, db: Pool, access: ApiAccess, origin?: string) {

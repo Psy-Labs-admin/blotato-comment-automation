@@ -8,6 +8,12 @@
     "node": ">=24"
   },
   "scripts": {
+    "quickstart": "node scripts/quickstart.cjs",
+    "monitoring:init": "node scripts/monitoring-init.cjs",
+    "verify": "node scripts/verify.cjs",
+    "test:browser": "playwright test",
+    "coverage:report": "node scripts/coverage-report.cjs",
+    "telegram:check": "node --env-file-if-exists=.env dist/alerts/check.js",
     "dev": "node --env-file-if-exists=.env --import tsx src/main.ts",
     "build": "node scripts/build.cjs",
     "start": "node --env-file-if-exists=.env dist/main.js",
@@ -33,11 +39,19 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "@temporalio/nyc-test-coverage": "1.25.0",
     "@temporalio/testing": "^1.25.0",
     "@types/node": "^22.20.5",
     "@types/pg": "^8.23.1",
+    "@vitest/coverage-v8": "4.1.12",
+    "istanbul-lib-coverage": "3.2.2",
+    "istanbul-lib-report": "3.0.1",
+    "istanbul-lib-source-maps": "5.0.6",
+    "istanbul-reports": "3.2.0",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
+    "v8-to-istanbul": "9.3.0",
     "vitest": "4.1.12"
   }
 }

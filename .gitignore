@@ -9,3 +9,7 @@ coverage/
 .demo.json
 
 .local/
+
+reports/
+test-results/
+playwright-report/

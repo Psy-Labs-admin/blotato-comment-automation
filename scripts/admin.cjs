@@ -6,7 +6,7 @@ const { spawn } = require('node:child_process');
 const { parseEnv } = require('node:util');
 const { Pool } = require('pg');
 
-const directory = path.resolve(__dirname, '../.local/operator');
+const directory = path.resolve(process.env.BLOTATO_LOCAL_DIR || path.resolve(__dirname, '../.local'), 'operator');
 const configFile = path.join(directory, 'credentials.json');
 const random = () => randomBytes(32).toString('hex');
 const hash = (value) => createHash('sha256').update(value).digest('hex');
@@ -15,6 +15,8 @@ async function init(name) {
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) throw new Error('Set DATABASE_URL to the database allocated to this installation.');
   if (!name?.trim() || name.length > 200) throw new Error('Supply the workspace name after init.');
+  const port = Number(process.env.PORT ?? '3000');
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('Invalid PORT');
   const parsed = new URL(databaseUrl);
   if (!['postgres:', 'postgresql:'].includes(parsed.protocol) || /[\r\n"\\]/.test(databaseUrl)) throw new Error('Invalid PostgreSQL connection URL.');
   const { migrate } = require('../dist/storage/migrate');
@@ -33,7 +35,7 @@ async function init(name) {
     if (credentials.database !== hash(databaseUrl)) throw new Error('This installation is already bound to a different database.');
     await pool.query('INSERT INTO tenants(id,name) VALUES ($1,$2) ON CONFLICT(id) DO NOTHING', [credentials.id,name.trim()]);
     const env = [
-      'NODE_ENV=production', 'ROLE=api', 'HOST=127.0.0.1', 'PORT=3000', 'DISPATCH_ENABLED=0',
+      'NODE_ENV=production', 'ROLE=api', 'HOST=127.0.0.1', 'PORT=' + port, 'DISPATCH_ENABLED=0',
       'DATABASE_URL="' + databaseUrl + '"',
       'TENANT_TOKEN_HASHES=' + JSON.stringify({[credentials.id]:hash(credentials.operator)}),
       'METRICS_TOKEN_HASH=' + hash(credentials.monitor),

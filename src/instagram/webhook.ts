@@ -4,6 +4,7 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import type { Clock } from '../domain/clock';
 import { isStopCommand } from '../domain/matching';
+import type { Metrics } from '../observability/metrics';
 import { ingestEvent } from '../ingest/ingest';
 import type { NormalizedEvent } from '../ingest/events';
 
@@ -31,6 +32,7 @@ export interface InstagramWebhookDeps {
   appSecret: string;
   verifyToken: string;
   onOutbox?: () => void;
+  metrics?: Metrics;
 }
 
 function matchesSecret(actual: unknown, expected: string): boolean {
@@ -67,56 +69,77 @@ export function registerInstagramWebhook(app: FastifyInstance, deps: InstagramWe
       return reply.type('text/plain').send(query['hub.challenge']);
     });
     hooks.post('/integrations/instagram/webhook', async (req, reply) => {
-      if (!Buffer.isBuffer(req.body) || !validInstagramSignature(req.body, req.headers['x-hub-signature-256'], deps.appSecret)) {
-        return reply.code(401).send({ error: 'Invalid Instagram signature' });
+      const count = (result: string) => deps.metrics?.nativeWebhookDeliveries.inc({ result });
+      try {
+        if (!Buffer.isBuffer(req.body) || !validInstagramSignature(req.body, req.headers['x-hub-signature-256'], deps.appSecret)) {
+          count('invalid');
+          return reply.code(401).send({ error: 'Invalid Instagram signature' });
+        }
+        let raw: unknown;
+        try {
+          raw = JSON.parse(req.body.toString('utf8'));
+        } catch {
+          count('invalid');
+          return reply.code(400).send({ error: 'Invalid JSON' });
+        }
+        const parsed = envelope.safeParse(raw);
+        if (!parsed.success) {
+          count('invalid');
+          return reply.code(400).send({ error: 'Invalid Instagram webhook' });
+        }
+        let accepted = 0;
+        for (const entry of parsed.data.entry) {
+          const account = await deps.db.query(
+            `SELECT c.id, c.status, c.verified_at, k.expires_at FROM social_connections c JOIN instagram_credentials k ON k.connection_id = c.id
+             WHERE c.platform = 'instagram' AND c.external_account_id = $1 AND c.integration_kind = 'native' AND c.status <> 'disconnected'`,
+            [entry.id],
+          );
+          if (!account.rowCount) continue;
+          const binding = account.rows[0];
+          const ordinary = binding.status === 'active' && binding.verified_at && binding.expires_at > deps.clock.now();
+          const events: NormalizedEvent[] = [];
+          for (const change of entry.changes ?? []) {
+            if (!ordinary || change.field !== 'comments') continue;
+            const value = comment.safeParse(change.value);
+            if (!value.success || (value.data.verb && !['add', 'created'].includes(value.data.verb))) continue;
+            events.push({
+              type: 'comment.created', accountId: entry.id, commentId: value.data.id, mediaId: value.data.media.id,
+              from: value.data.from, text: value.data.text, occurredAt: occurredAt(value.data.timestamp ?? entry.time, entry.time),
+            });
+          }
+          for (const item of entry.messaging ?? []) {
+            const value = message.safeParse(item);
+            if (!value.success || value.data.message.is_deleted) continue;
+            const event = value.data;
+            const echo = event.message.is_echo === true || event.sender.id === entry.id;
+            if (echo ? event.sender.id !== entry.id : event.recipient.id !== entry.id) continue;
+            // A user's opt-out remains effective while their account token is being reconnected.
+            if (!ordinary && (echo || !isStopCommand(event.message.text ?? ''))) continue;
+            events.push({
+              type: 'message.received', accountId: entry.id, messageId: event.message.mid,
+              from: { id: echo ? event.recipient.id : event.sender.id }, text: event.message.text ?? '',
+              occurredAt: occurredAt(event.timestamp, entry.time), isEcho: echo,
+            });
+          }
+          for (const event of events) {
+            const result = await ingestEvent({ db: deps.db, clock: deps.clock, source:'native' }, event);
+            const outcome = result.status === 'accepted' && result.duplicate ? 'duplicate' : result.status;
+            deps.metrics?.nativeWebhookEvents.inc({ type: event.type, result: outcome });
+            if (result.status === 'rejected' && result.httpStatus === 404) continue;
+            if (result.status !== 'accepted') {
+              count('rejected');
+              return reply.code(503).send({ error: 'Instagram event could not be stored' });
+            }
+            accepted++;
+          }
+        }
+        deps.onOutbox?.();
+        count(accepted ? 'accepted' : 'ignored');
+        return { received: true, accepted };
+      } catch (error) {
+        count('storage_error');
+        throw error;
       }
-      let raw: unknown;
-      try { raw = JSON.parse(req.body.toString('utf8')); } catch { return reply.code(400).send({ error: 'Invalid JSON' }); }
-      const parsed = envelope.safeParse(raw);
-      if (!parsed.success) return reply.code(400).send({ error: 'Invalid Instagram webhook' });
-      let accepted = 0;
-      for (const entry of parsed.data.entry) {
-        const account = await deps.db.query(
-          `SELECT c.id, c.status, c.verified_at, k.expires_at FROM social_connections c JOIN instagram_credentials k ON k.connection_id = c.id
-           WHERE c.platform = 'instagram' AND c.external_account_id = $1 AND c.integration_kind = 'native' AND c.status <> 'disconnected'`,
-          [entry.id],
-        );
-        if (!account.rowCount) continue;
-        const binding = account.rows[0];
-        const ordinary = binding.status === 'active' && binding.verified_at && binding.expires_at > deps.clock.now();
-        const events: NormalizedEvent[] = [];
-        for (const change of entry.changes ?? []) {
-          if (!ordinary || change.field !== 'comments') continue;
-          const value = comment.safeParse(change.value);
-          if (!value.success || (value.data.verb && !['add', 'created'].includes(value.data.verb))) continue;
-          events.push({
-            type: 'comment.created', accountId: entry.id, commentId: value.data.id, mediaId: value.data.media.id,
-            from: value.data.from, text: value.data.text, occurredAt: occurredAt(value.data.timestamp ?? entry.time, entry.time),
-          });
-        }
-        for (const item of entry.messaging ?? []) {
-          const value = message.safeParse(item);
-          if (!value.success || value.data.message.is_deleted) continue;
-          const event = value.data;
-          const echo = event.message.is_echo === true || event.sender.id === entry.id;
-          if (echo ? event.sender.id !== entry.id : event.recipient.id !== entry.id) continue;
-          // A user's opt-out remains effective while their account token is being reconnected.
-          if (!ordinary && (echo || !isStopCommand(event.message.text ?? ''))) continue;
-          events.push({
-            type: 'message.received', accountId: entry.id, messageId: event.message.mid,
-            from: { id: echo ? event.recipient.id : event.sender.id }, text: event.message.text ?? '',
-            occurredAt: occurredAt(event.timestamp, entry.time), isEcho: echo,
-          });
-        }
-        for (const event of events) {
-          const result = await ingestEvent({ db: deps.db, clock: deps.clock, source:'native' }, event);
-          if (result.status === 'rejected' && result.httpStatus === 404) continue;
-          if (result.status !== 'accepted') return reply.code(503).send({ error: 'Instagram event could not be stored' });
-          accepted++;
-        }
-      }
-      deps.onOutbox?.();
-      return { received: true, accepted };
     });
   });
 }

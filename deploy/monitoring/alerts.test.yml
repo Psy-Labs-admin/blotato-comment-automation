@@ -1,0 +1,150 @@
+rule_files:
+  - alerts.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'pipeline_configured{job="comment-automation",instance="api:3000"}'
+        values: '1+0x10'
+      - series: 'service_role_required{role="worker",job="comment-automation",instance="api:3000"}'
+        values: '1+0x10'
+      - series: 'service_role_ready{role="worker",job="comment-automation",instance="api:3000"}'
+        values: '0+0x10'
+      - series: 'service_role_ready{role="relay",job="comment-automation",instance="api:3000"}'
+        values: '1+0x10'
+      - series: 'outbox_oldest_pending_seconds{kind="crm.lead_captured",job="comment-automation",instance="api:3000"}'
+        values: '900+0x10'
+      - series: 'delivery_destination_configured{kind="crm.lead_captured",job="comment-automation",instance="api:3000"}'
+        values: '0+0x10'
+      - series: 'outbox_oldest_pending_seconds{kind="workflow.start",job="comment-automation",instance="api:3000"}'
+        values: '900+0x10'
+      - series: 'delivery_destination_configured{kind="workflow.start",job="comment-automation",instance="api:3000"}'
+        values: '1+0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AutomationRoleUnavailable
+        exp_alerts:
+          - exp_labels: {job: comment-automation, instance: "api:3000", role: worker, severity: critical}
+            exp_annotations: {summary: Automation worker or relay has no fresh successful health observation}
+      - eval_time: 3m
+        alertname: AutomationDeliveryLag
+        exp_alerts:
+          - exp_labels: {job: comment-automation, instance: "api:3000", kind: workflow.start, severity: warning}
+            exp_annotations: {summary: A configured delivery destination is falling behind}
+  - interval: 1m
+    input_series:
+      - series: 'pipeline_configured{job="comment-automation",instance="api:3000"}'
+        values: '0+0x10'
+      - series: 'service_role_ready{role="worker",job="comment-automation",instance="api:3000"}'
+        values: '0+0x10'
+      - series: 'inbox_unrouted_oldest_seconds{job="comment-automation",instance="api:3000"}'
+        values: '900+0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AutomationRoleUnavailable
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: AutomationRoutingLag
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'outbox_dead_rows{kind="alert.notify",job="comment-automation",instance="api:3000"}'
+        values: '2+0x10'
+      - series: 'delivery_destination_configured{kind="alert.notify",job="comment-automation",instance="api:3000"}'
+        values: '0+0x10'
+      - series: 'outbox_dead_rows{kind="metadata.hydrate",job="comment-automation",instance="api:3000"}'
+        values: '1+0x10'
+      - series: 'delivery_destination_configured{kind="metadata.hydrate",job="comment-automation",instance="api:3000"}'
+        values: '1+0x10'
+      - series: 'intents_unknown_oldest_seconds{job="comment-automation",instance="api:3000"}'
+        values: '600+0x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: AutomationDeadDelivery
+        exp_alerts:
+          - exp_labels: {job: comment-automation, instance: "api:3000", kind: metadata.hydrate, severity: warning}
+            exp_annotations: {summary: A configured delivery destination has stopped deliveries}
+      - eval_time: 2m
+        alertname: AutomationUnknownSend
+        exp_alerts:
+          - exp_labels: {job: comment-automation, instance: "api:3000", severity: warning}
+            exp_annotations: {summary: A message outcome needs human confirmation}
+
+  - interval: 1m
+    input_series:
+      - series: 'up{job="comment-automation",instance="api:3000"}'
+        values: '1 0 0 0 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: AutomationApiUnavailable
+        exp_alerts:
+          - exp_labels: {job: comment-automation, instance: 'api:3000', severity: critical}
+            exp_annotations: {summary: The API metrics endpoint is unavailable or no API target is configured}
+      - eval_time: 5m
+        alertname: AutomationApiUnavailable
+        exp_alerts: []
+  - interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: AutomationApiUnavailable
+        exp_alerts:
+          - exp_labels: {job: comment-automation, severity: critical}
+            exp_annotations: {summary: The API metrics endpoint is unavailable or no API target is configured}
+  - interval: 1m
+    input_series:
+      - series: 'pipeline_configured{job="comment-automation",instance="api-disabled:3000"}'
+        values: '0+0x10'
+      - series: 'pipeline_configured{job="comment-automation",instance="api-enabled:3000"}'
+        values: '1+0x10'
+      - series: 'pipeline_configured{job="unrelated",instance="api-disabled:3000"}'
+        values: '1+0x10'
+      - series: 'service_role_ready{job="comment-automation",instance="api-disabled:3000",role="worker"}'
+        values: '0+0x10'
+      - series: 'service_role_ready{job="comment-automation",instance="api-enabled:3000",role="worker"}'
+        values: '1+0x10'
+      - series: 'inbox_unrouted_oldest_seconds{job="comment-automation",instance="api-disabled:3000"}'
+        values: '900+0x10'
+      - series: 'outbox_oldest_pending_seconds{job="comment-automation",instance="api-disabled:3000",kind="crm.lead_captured"}'
+        values: '900+0x10'
+      - series: 'outbox_dead_rows{job="comment-automation",instance="api-disabled:3000",kind="crm.lead_captured"}'
+        values: '2+0x10'
+      - series: 'delivery_destination_configured{job="comment-automation",instance="api-disabled:3000",kind="crm.lead_captured"}'
+        values: '0+0x10'
+      - series: 'delivery_destination_configured{job="comment-automation",instance="api-enabled:3000",kind="crm.lead_captured"}'
+        values: '1+0x10'
+      - series: 'intents_unknown_oldest_seconds{job="unrelated",instance="api-disabled:3000"}'
+        values: '900+0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AutomationRoleUnavailable
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: AutomationRoutingLag
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: AutomationDeliveryLag
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: AutomationDeadDelivery
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: AutomationUnknownSend
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'service_role_required{job="comment-automation",instance="api",role="worker"}'
+        values: '0+0x5'
+      - series: 'service_role_ready{job="comment-automation",instance="api",role="worker"}'
+        values: '0+0x5'
+      - series: 'service_role_required{job="comment-automation",instance="api",role="relay"}'
+        values: '1+0x5'
+      - series: 'service_role_ready{job="comment-automation",instance="api",role="relay"}'
+        values: '0+0x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: AutomationRoleUnavailable
+        exp_alerts:
+          - exp_labels: {job: comment-automation, instance: api, role: relay, severity: critical}
+            exp_annotations: {summary: Automation worker or relay has no fresh successful health observation}

@@ -39,6 +39,16 @@ describe('CRM delivery recovery', () => {
     expect(await handlers['alert.notify']({ ...row, kind: 'alert.notify', payload: { incidentId: 'unread-without-delivery', kind: 'opened' } })).toMatchObject({ retryInMs: 60_000 });
   });
 
+  it('rejects cross-tenant CRM references and skips already synced leads before external delivery', async () => {
+    const {row, lead} = await pendingLead();
+    const other = await seedTenant(t.db); let calls = 0;
+    const handler = integrationHandlers({db:t.db,crm:{upsertLead:async()=>{calls++;}}})['crm.lead_captured'];
+    await expect(handler({...row,tenantId:other.tenantId})).rejects.toMatchObject({code:'crm_scope_invalid'});
+    await expect(handler({...row,tenantId:null})).rejects.toMatchObject({code:'crm_scope_invalid'});
+    await t.db.query("UPDATE leads SET crm_status='synced' WHERE id=$1",[lead.id]);
+    await handler(row); expect(calls).toBe(0);
+  });
+
   it('does not reopen a CRM incident for a stale failure after another handler synced the lead', async () => {
     const { db } = t;
     const { tenant, row } = await pendingLead();

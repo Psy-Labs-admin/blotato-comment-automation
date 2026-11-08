@@ -1,0 +1,4 @@
+route:
+  receiver: discard
+receivers:
+  - name: discard

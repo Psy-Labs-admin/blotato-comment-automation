@@ -31,6 +31,7 @@
             ></span
           ></a>
           <a href="#accounts" data-view="accounts">Accounts</a>
+          <a href="#operations" data-view="operations">Operations</a>
         </nav>
         <div class="sidebar-bottom" id="workspace-session" hidden>
           <button type="button" id="sign-out" class="text-button">
@@ -275,6 +276,33 @@
             Keep unresolved</button
           ><button type="submit" id="save-resolution" class="button primary">
             Save decision
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="retry-dialog" aria-labelledby="retry-title">
+      <form id="retry-form">
+        <h2 id="retry-title">Retry delivery</h2>
+        <p id="retry-explanation">
+          Confirm the integration is working, then record why you are retrying
+          this delivery.
+        </p>
+        <div class="field">
+          <label for="retry-note">Reason for retry</label>
+          <textarea
+            id="retry-note"
+            rows="3"
+            maxlength="500"
+            required
+          ></textarea>
+        </div>
+        <p id="retry-error" class="field-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button type="button" id="close-retry" class="button secondary">
+            Cancel
+          </button>
+          <button type="submit" id="submit-retry" class="button primary">
+            Retry delivery
           </button>
         </div>
       </form>

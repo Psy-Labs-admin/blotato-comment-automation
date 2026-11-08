@@ -1,0 +1,2 @@
+# The actual API endpoint; override this mounted file for another host/port.
+- targets: ['host.docker.internal:3000']

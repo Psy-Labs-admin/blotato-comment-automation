@@ -1,10 +1,11 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { bundleWorkflowCode, NativeConnection, Worker, type WorkflowBundleWithSourceMap, type WorkerDeploymentOptions } from '@temporalio/worker';
+import { bundleWorkflowCode, NativeConnection, Worker, type WorkflowBundleWithSourceMap, type WorkerDeploymentOptions, type WorkerOptions } from '@temporalio/worker';
 import { createActivities } from '../activities';
 import type { ActivityDeps } from '../activities/deps';
 
 export interface RunningWorker {
+  state(): string;
   shutdown(): Promise<void>;
 }
 
@@ -31,18 +32,22 @@ export async function startWorker(o: {
   taskQueue: string;
   namespace?: string;
   deploymentOptions?: WorkerDeploymentOptions;
+  workflowBundle?: WorkflowBundleWithSourceMap;
+  sinks?: WorkerOptions['sinks'];
 }): Promise<RunningWorker> {
-  bundle ??= bundleWorkflowCode({ workflowsPath: workflowsPath(), logger: quietLogger });
+  const workflowBundle = o.workflowBundle ?? await (bundle ??= bundleWorkflowCode({ workflowsPath: workflowsPath(), logger: quietLogger }));
   const worker = await Worker.create({
     connection: o.connection,
     namespace: o.namespace ?? 'default',
     taskQueue: o.taskQueue,
-    workflowBundle: await bundle,
+    workflowBundle,
+    sinks: o.sinks,
     activities: createActivities(o.deps),
     workerDeploymentOptions: o.deploymentOptions,
   });
   const running = worker.run();
   return {
+    state: () => worker.getState(),
     async shutdown() {
       if (worker.getState() === 'RUNNING') worker.shutdown();
       await running;

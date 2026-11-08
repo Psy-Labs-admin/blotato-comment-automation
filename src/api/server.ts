@@ -18,6 +18,8 @@ import type { InstagramConfig } from '../instagram/config';
 import { registerInstagramLogin } from '../instagram/oauth';
 import { registerInstagramWebhook } from '../instagram/webhook';
 import { registerSessions } from './session';
+import { registerOperations } from './operations';
+import { readPipelineHealth, type OperationsConfig } from '../observability/operations';
 import { registerOperator } from './operator';
 import { OperatorError } from '../storage/drafts';
 import { bearerDigest, validWebhook, type ApiAccess } from './access';
@@ -27,6 +29,7 @@ import { buildConversationTimeline, buildTimeline } from '../timeline';
 export interface ServerDeps {
   access: ApiAccess;
   dispatchConfigured?: boolean;
+  operations?: Omit<OperationsConfig, 'dispatchConfigured'>;
   integrationMode?: 'gateway' | 'native' | 'unconfigured';
   provisioningSecret?: string;
   integrationSettingsUrl?: string;
@@ -49,7 +52,8 @@ const Uuid = z.string().uuid();
  */
 export function buildServer(deps: ServerDeps): FastifyInstance {
   const { db, clock } = deps;
-  const metrics = deps.metrics ?? createMetrics(db);
+  const operations = { ...deps.operations, dispatchConfigured: deps.dispatchConfigured ?? false };
+  const metrics = deps.metrics ?? createMetrics(db, operations);
   const app = Fastify({
     logger: deps.logger === false ? false : {
       level: process.env.LOG_LEVEL ?? 'info',
@@ -63,8 +67,8 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     function finish(req: FastifyRequest, status: number) {
       const route = req.routeOptions.url;
       const group: TraceRouteGroup = !route ? 'unmatched'
-        : route === '/webhooks/instagram' ? 'webhook'
-        : route === '/health' ? 'health' : route === '/metrics' ? 'metrics'
+        : (route === '/webhooks/instagram' || route === '/integrations/instagram/webhook') ? 'webhook'
+        : ['/live', '/health', '/ready'].includes(route) ? 'health' : route === '/metrics' ? 'metrics'
         : route === '/' || route.startsWith('/console') ? 'console' : 'management';
       spans.get(req)?.end(status, group);
       spans.delete(req);
@@ -81,11 +85,12 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   const {tenantOf, csrfFor, sessionBinding} = registerSessions(app, db, deps.access, deps.consoleOrigin);
   const dispatchConfigured = deps.dispatchConfigured ?? false;
   const integrationMode = deps.integrationMode ?? (deps.nativeInstagram ? 'native' : 'unconfigured');
+  registerOperations(app, { ...operations, db, onOutbox: deps.onOutbox }, tenantOf);
   registerOperator(app, {...deps, integrationMode, dispatchConfigured}, tenantOf);
   registerInstagramLogin(app, {db, clock, config:deps.nativeInstagram, tenantOf, sessionIdentity:sessionBinding, credentialActive:(digest, tenant) => deps.access.tenants.get(digest) === tenant});
   if (deps.nativeInstagram) {
     registerInstagramWebhook(app, {
-      db, clock, appSecret:deps.nativeInstagram.webhookAppSecret, verifyToken:deps.nativeInstagram.webhookVerifyToken, onOutbox:deps.onOutbox,
+      db, clock, appSecret:deps.nativeInstagram.webhookAppSecret, verifyToken:deps.nativeInstagram.webhookVerifyToken, metrics, onOutbox:deps.onOutbox,
     });
   }
   registerConsole(app);
@@ -121,6 +126,17 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       return { ok: true };
     } catch {
       return reply.code(503).send({ ok: false });
+    }
+  });
+
+  app.get('/live', async () => ({ ok: true }));
+  app.get('/ready', async (_req, reply) => {
+    try {
+      const pipeline = await readPipelineHealth(db, operations);
+      const ready = pipeline.state !== 'attention';
+      return reply.code(ready ? 200 : 503).send({ ok: ready, pipeline: pipeline.state });
+    } catch {
+      return reply.code(503).send({ ok: false, pipeline: 'unavailable' });
     }
   });
 

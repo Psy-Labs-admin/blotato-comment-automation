@@ -1,0 +1,45 @@
+groups:
+  - name: comment-automation
+    rules:
+      - alert: AutomationApiUnavailable
+        expr: (up{job="comment-automation"} == 0) or absent(up{job="comment-automation"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: The API metrics endpoint is unavailable or no API target is configured
+      - alert: AutomationRoleUnavailable
+        expr: (service_role_ready{job="comment-automation"} == 0) and on(job,instance,role) (service_role_required{job="comment-automation"} == 1)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Automation worker or relay has no fresh successful health observation
+      - alert: AutomationDeliveryLag
+        expr: (outbox_oldest_pending_seconds{job="comment-automation"} > 120) and on(job,instance,kind) (delivery_destination_configured{job="comment-automation"} == 1)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: A configured delivery destination is falling behind
+      - alert: AutomationDeadDelivery
+        expr: (outbox_dead_rows{job="comment-automation"} > 0) and on(job,instance,kind) (delivery_destination_configured{job="comment-automation"} == 1)
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: A configured delivery destination has stopped deliveries
+      - alert: AutomationRoutingLag
+        expr: (inbox_unrouted_oldest_seconds{job="comment-automation"} > 60) and on(job,instance) (pipeline_configured{job="comment-automation"} == 1)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Accepted events are waiting for routing
+      - alert: AutomationUnknownSend
+        expr: intents_unknown_oldest_seconds{job="comment-automation"} > 300
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: A message outcome needs human confirmation

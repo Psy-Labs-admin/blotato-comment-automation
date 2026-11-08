@@ -1,0 +1,5 @@
+{
+  "server": { "lines": 86, "branches": 72, "functions": 79, "statements": 79 },
+  "workflow": { "lines": 97, "branches": 86, "functions": 100, "statements": 93 },
+  "browser": { "lines": 60, "branches": 85, "functions": 74, "statements": 60 }
+}

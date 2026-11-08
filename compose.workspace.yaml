@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: blotato
+      POSTGRES_PASSWORD: ${BLOTATO_DB_PASSWORD:?Start through npm run quickstart}
+    ports:
+      - "127.0.0.1:${BLOTATO_DB_PORT:?Start through npm run quickstart}:5432"
+    volumes:
+      - ${BLOTATO_PG_STORAGE:-workspace_data}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d blotato"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  workspace_data:

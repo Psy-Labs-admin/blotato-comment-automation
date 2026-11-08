@@ -1,0 +1,48 @@
+name: blotato-monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.13.5
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - '127.0.0.1:${MONITORING_PROMETHEUS_PORT:-9090}:9090'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ${MONITORING_TARGETS_FILE:-./deploy/monitoring/targets.yml}:/etc/prometheus/targets.yml:ro
+      - ${MONITORING_ALERTMANAGERS_FILE:-./deploy/monitoring/alertmanagers.disabled.yml}:/etc/prometheus/alertmanagers.yml:ro
+      - ${MONITORING_DATA_VOLUME:-monitoring_data}:/prometheus
+    secrets:
+      - metrics_token
+
+  alertmanager:
+    image: prom/alertmanager:v0.34.2
+    profiles: [telegram]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --cluster.listen-address=
+    ports:
+      - '127.0.0.1:${MONITORING_ALERTMANAGER_PORT:-9093}:9093'
+    volumes:
+      - ${MONITORING_ALERTMANAGER_CONFIG:-./deploy/monitoring/alertmanager.disabled.yml}:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    secrets:
+      - telegram_token
+
+secrets:
+  metrics_token:
+    file: ${MONITORING_METRICS_TOKEN_FILE:-./.local/monitoring/metrics.token}
+  telegram_token:
+    file: ${MONITORING_TELEGRAM_TOKEN_FILE:-./.local/monitoring/telegram.token}
+
+volumes:
+  monitoring_data: {}
+  alertmanager_data: {}

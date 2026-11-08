@@ -12,30 +12,32 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 55432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 3s
-          --health-timeout 3s
-          --health-retries 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm run build
-      - run: npm test
+      - name: Run the clean installation and acceptance suite
+        run: npm run verify
+      - name: Validate external monitoring and alert rules
+        run: sh deploy/monitoring/check.sh
+      - name: Exercise the default Docker quickstart twice
+        run: node scripts/workspace-smoke.cjs --docker-workspace
       - name: Build deployable image
         run: docker build --tag blotato-workspace:checks .
       - name: Verify runtime assets
         run: docker run --rm blotato-workspace:checks node -e "require('./dist/api/server'); require('node:fs').accessSync('dist/ui/index.html')"
+      - name: Upload coverage and acceptance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-${{ github.sha }}
+          retention-days: 30
+          path: |
+            coverage/
+            !coverage/server/
+            reports/tests.xml
+            reports/browser.xml
+            reports/acceptance/

@@ -1,3 +1,4 @@
+import { NotificationError } from '../alerts/errors';
 import type { Tracing } from '../observability/tracing';
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
@@ -11,6 +12,7 @@ export interface OutboxRow {
   idempotencyKey: string;
   payload: any;
   attempts: number;
+  claimToken?: string;
 }
 
 /** Return `{ retryInMs }` for "not yet" (e.g. signal before workflow start): rescheduled, no attempt burned. Throw for failure. */
@@ -28,6 +30,7 @@ export interface RelayOptions {
   backoff?: (attempt: number) => number;
   onDead?: (c: PoolClient, row: OutboxRow, error: string) => Promise<void>;
   onError?: (err: unknown) => void;
+  onCycle?: (error?: unknown) => void;
 }
 
 export function jitteredBackoff(attempt: number, baseMs = 500, maxMs = 60_000): number {
@@ -37,8 +40,8 @@ export function jitteredBackoff(attempt: number, baseMs = 500, maxMs = 60_000): 
 
 /**
  * Delivers outbox rows at least once. Rows are claimed in a short transaction with
- * FOR UPDATE SKIP LOCKED plus a lease, and the external call happens after commit, so no DB lock
- * is ever held across the network. A lease protects local work only: handlers must be idempotent
+ * FOR UPDATE SKIP LOCKED plus a lease, and the external call happens after commit, so no transaction or row lock
+ * is held across the network. Alert delivery may hold a destination advisory lock. A lease protects local work only: handlers must be idempotent
  * (fixed workflow ids, wake-up signals, CRM idempotency keys).
  *
  * Several relays (one per kind group, e.g. Temporal commands vs CRM) keep a slow CRM from
@@ -70,7 +73,7 @@ export class OutboxRelay {
         ]);
       }
       return r.rows.map(
-        (x): OutboxRow => ({ id: x.id, tenantId: x.tenant_id, kind: x.kind, idempotencyKey: x.idempotency_key, payload: x.payload, attempts: x.attempts }),
+        (x): OutboxRow => ({ id: x.id, tenantId: x.tenant_id, kind: x.kind, idempotencyKey: x.idempotency_key, payload: x.payload, attempts: x.attempts, claimToken }),
       );
     });
     await Promise.all(rows.map((row) => this.process(row, claimToken)));
@@ -96,8 +99,8 @@ export class OutboxRelay {
       );
     } catch (err) {
       const attempts = row.attempts + 1;
-      const error = String(err);
-      if (attempts >= (this.o.maxAttempts ?? 25)) {
+      const error = err instanceof NotificationError ? err.code : String(err);
+      if ((err instanceof NotificationError && err.options.permanent) || attempts >= (this.o.maxAttempts ?? 25)) {
         await withTx(db, async (c) => {
           const dead = await c.query(
             `UPDATE outbox SET status = 'dead', done_at = now(), attempts = $2, last_error = $3, locked_until = NULL, claim_token = NULL WHERE id = $1 AND status = 'pending' AND claim_token = $4`,
@@ -106,7 +109,7 @@ export class OutboxRelay {
           if (dead.rowCount) await this.o.onDead?.(c, { ...row, attempts }, error);
         });
       } else {
-        const delay = (this.o.backoff ?? jitteredBackoff)(attempts);
+        const delay = Math.max((this.o.backoff ?? jitteredBackoff)(attempts), err instanceof NotificationError ? err.options.retryAfterMs ?? 0 : 0);
         await db.query(
           `UPDATE outbox SET attempts = $2, last_error = $3, locked_until = NULL, claim_token = NULL,
              next_attempt_at = now() + make_interval(secs => $4) WHERE id = $1 AND status = 'pending' AND claim_token = $5`,
@@ -129,7 +132,9 @@ export class OutboxRelay {
         let n = 0;
         try {
           n = await this.drainOnce();
+          this.observeCycle();
         } catch (err) {
+          this.observeCycle(err);
           this.o.onError?.(err);
         }
         if (n === 0 && this.running) {
@@ -144,6 +149,10 @@ export class OutboxRelay {
         }
       }
     })();
+  }
+
+  private observeCycle(error?: unknown): void {
+    try { this.o.onCycle?.(error); } catch { /* Monitoring must not interrupt delivery. */ }
   }
 
   async stop(): Promise<void> {

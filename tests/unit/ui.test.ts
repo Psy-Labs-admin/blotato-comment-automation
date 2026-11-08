@@ -18,6 +18,8 @@ describe("operator console public shell", () => {
         "font-src 'self'",
       );
       expect(page.body).toContain('aria-labelledby="editor-title"');
+      expect(page.body).toContain('aria-labelledby="retry-title"');
+      expect(page.body).toContain('data-view="operations"');
       expect(page.body).not.toContain("Open demo workspace");
       for (const [path, type] of [
         ["/console.js", "text/javascript"],
