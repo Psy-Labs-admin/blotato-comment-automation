@@ -14,14 +14,24 @@ import { createAutomation, publishVersion, setAutomationStatus } from '../storag
 import { audit } from '../storage/audit';
 import { requestRunCancel } from '../storage/controls';
 import { withTx } from '../storage/db';
-import { localRequest } from './loopback';
+import type { InstagramConfig } from '../instagram/config';
+import { registerInstagramLogin } from '../instagram/oauth';
+import { registerInstagramWebhook } from '../instagram/webhook';
+import { registerSessions } from './session';
+import { registerOperator } from './operator';
+import { OperatorError } from '../storage/drafts';
 import { bearerDigest, validWebhook, type ApiAccess } from './access';
 import { registerConsole } from '../ui';
 import { buildConversationTimeline, buildTimeline } from '../timeline';
 
 export interface ServerDeps {
-  access?: ApiAccess;
-  demo?: boolean;
+  access: ApiAccess;
+  dispatchConfigured?: boolean;
+  integrationMode?: 'gateway' | 'native' | 'unconfigured';
+  provisioningSecret?: string;
+  integrationSettingsUrl?: string;
+  nativeInstagram?: InstagramConfig;
+  consoleOrigin?: string;
   tracing?: Tracing;
   db: Pool;
   clock: Clock;
@@ -34,14 +44,17 @@ const Uuid = z.string().uuid();
 
 /**
  * Thin HTTP layer: webhook intake from the existing integration, and management/inspection for the
- * product. A verified operator token selects the tenant. Local demos use x-tenant-id. Every
+ * product. Operator credentials and browser sessions are bound to a tenant. Every
  * query is scoped by it, so another tenant's ids simply do not exist (404).
  */
 export function buildServer(deps: ServerDeps): FastifyInstance {
   const { db, clock } = deps;
   const metrics = deps.metrics ?? createMetrics(db);
   const app = Fastify({
-    logger: deps.logger === false ? false : { level: process.env.LOG_LEVEL ?? 'info', redact: ['req.headers.authorization'] },
+    logger: deps.logger === false ? false : {
+      level: process.env.LOG_LEVEL ?? 'info',
+      serializers: { req: (request: { method?:string; url?:string }) => ({ method:request.method, path:request.url?.split('?')[0] }) },
+      redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'] },
   });
 
   const tracing = deps.tracing;
@@ -65,36 +78,36 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     app.addHook('onRequestAbort', async (req) => finish(req, 499));
     app.addHook('onTimeout', async (req) => finish(req, 504));
   }
-  if (!deps.access) {
-    app.addHook('onRequest', async (req, reply) => {
-      if (!localRequest(req.headers.host, req.headers.origin)) return reply.code(403).send({ error: 'Local requests only' });
-    });
-  }
-  if (deps.demo && !deps.access) {
-    app.get('/demo/workspace', async (_req, reply) => {
-      const connection = await db.query("SELECT tenant_id FROM social_connections WHERE platform = 'instagram' AND external_account_id = 'ig_demo_coffee'");
-      return connection.rowCount ? { tenantId: connection.rows[0].tenant_id } : reply.code(404).send({ error: 'Demo has not been seeded' });
+  const {tenantOf, csrfFor, sessionBinding} = registerSessions(app, db, deps.access, deps.consoleOrigin);
+  const dispatchConfigured = deps.dispatchConfigured ?? false;
+  const integrationMode = deps.integrationMode ?? (deps.nativeInstagram ? 'native' : 'unconfigured');
+  registerOperator(app, {...deps, integrationMode, dispatchConfigured}, tenantOf);
+  registerInstagramLogin(app, {db, clock, config:deps.nativeInstagram, tenantOf, sessionIdentity:sessionBinding, credentialActive:(digest, tenant) => deps.access.tenants.get(digest) === tenant});
+  if (deps.nativeInstagram) {
+    registerInstagramWebhook(app, {
+      db, clock, appSecret:deps.nativeInstagram.webhookAppSecret, verifyToken:deps.nativeInstagram.webhookVerifyToken, onOutbox:deps.onOutbox,
     });
   }
   registerConsole(app);
   app.get('/', async (_req, reply) => reply.redirect('/console'));
-
-  function tenantOf(req: FastifyRequest, reply: FastifyReply): string | undefined {
-    if (deps.access) {
-      const tenant = deps.access.tenants.get(bearerDigest(req.headers.authorization) ?? '');
-      if (!tenant || (req.headers['x-tenant-id'] && req.headers['x-tenant-id'] !== tenant)) {
-        reply.code(401).send({ error: 'A valid tenant access token is required' });
-        return undefined;
-      }
-      return tenant;
-    }
-    const t = Uuid.safeParse(req.headers['x-tenant-id']);
-    if (!t.success) {
-      reply.code(401).send({ error: 'x-tenant-id header (uuid) required' });
-      return undefined;
-    }
-    return t.data;
-  }
+  app.get('/workspace', async (req, reply) => {
+    const tenant = tenantOf(req, reply);
+    if (!tenant) return;
+    const workspace = (await db.query('SELECT name FROM tenants WHERE id=$1', [tenant])).rows[0];
+    if (!workspace) return reply.code(404).send({ error: 'Workspace not found' });
+    return { name: workspace.name, csrfToken: csrfFor(req), integrations: {
+      instagramConnectUrl: deps.integrationSettingsUrl ?? null, dispatchConfigured,
+      instagramLoginConfigured: Boolean(deps.nativeInstagram),
+      instagramSetup: {callbackPath:'/integrations/instagram/callback', webhookPath:'/integrations/instagram/webhook', configured:Boolean(deps.nativeInstagram)},
+    }};
+  });
+  app.setErrorHandler((error, req, reply) => {
+    if (error instanceof OperatorError) return reply.code(error.status).send({error:error.message, code:error.code});
+    const status = (error as {statusCode?:number}).statusCode;
+    if (status && status >= 400 && status < 500) return reply.code(status).send({error:'Invalid request'});
+    req.log.error({err:error}, 'Request failed');
+    return reply.code(500).send({error:'Request could not be completed'});
+  });
   const idParam = (req: FastifyRequest) => Uuid.safeParse((req.params as any).id);
 
   app.addHook('onSend', async (_req, reply) => {
@@ -112,7 +125,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   });
 
   app.get('/metrics', async (req, reply) => {
-    if (deps.access && bearerDigest(req.headers.authorization) !== deps.access.metricsDigest) {
+    if (bearerDigest(req.headers.authorization) !== deps.access.metricsDigest) {
       return reply.code(401).send({ error: 'A monitoring token is required' });
     }
     reply.header('content-type', metrics.registry.contentType);
@@ -120,11 +133,11 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   });
 
   // ---- Webhook intake ---------------------------------------------------------------------------
-  app.register(async (hooks) => {
+  if (integrationMode === 'gateway') app.register(async (hooks) => {
     hooks.addContentTypeParser('application/json', { parseAs: 'buffer', bodyLimit: 65536 }, (_req, bytes, done) => done(null, bytes));
     hooks.post('/webhooks/instagram', async (req, reply) => {
       if (!Buffer.isBuffer(req.body)) return reply.code(415).send({ error: 'application/json required' });
-      if (deps.access && !validWebhook(req.body, req.headers['x-webhook-timestamp'], req.headers['x-webhook-signature'], deps.access.webhookSecret, clock.now())) {
+      if (!validWebhook(req.body, req.headers['x-webhook-timestamp'], req.headers['x-webhook-signature'], deps.access.webhookSecret, clock.now())) {
         return reply.code(401).send({ error: 'Invalid webhook signature or timestamp' });
       }
       let event;
@@ -134,7 +147,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
         return reply.code(400).send({ error: 'Invalid JSON' });
       }
       const type = ['comment.created', 'message.received'].includes(event?.type) ? event.type : 'unknown';
-      const ingest = () => ingestEvent({ db, clock }, event);
+      const ingest = () => ingestEvent({ db, clock, source:'gateway' }, event);
       const res = await (tracing ? tracing.withSpan('webhook.ingest', ingest) : ingest());
       if (res.status === 'rejected') {
         metrics.webhooks.inc({ type, result: 'rejected' });
@@ -187,7 +200,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     const conn = await db.query(`SELECT 1 FROM social_connections WHERE id = $1 AND tenant_id = $2`, [body.data.connectionId, tenantId]);
     if (!conn.rowCount) return reply.code(404).send({ error: 'connection not found' });
     try {
-      const created = await createAutomation(db, { tenantId, ...body.data, definition: body.data.definition });
+      const created = await createAutomation(db, { dispatchConfigured, integrationMode, tenantId, ...body.data, definition: body.data.definition });
       return reply.code(201).send(created);
     } catch (err) {
       if (err instanceof DefinitionError) return reply.code(400).send({ error: 'invalid definition', issues: err.issues });
@@ -201,7 +214,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     if (!tenantId) return;
     if (!id.success) return reply.code(404).send({ error: 'not found' });
     try {
-      const v = await publishVersion(db, { tenantId, automationId: id.data, definition: (req.body as any)?.definition });
+      const v = await publishVersion(db, { dispatchConfigured, integrationMode, tenantId, automationId: id.data, definition: (req.body as any)?.definition });
       return v ? reply.code(201).send(v) : reply.code(404).send({ error: 'not found' });
     } catch (err) {
       if (err instanceof DefinitionError) return reply.code(400).send({ error: 'invalid definition', issues: err.issues });
@@ -214,7 +227,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       const tenantId = tenantOf(req, reply);
       const id = idParam(req);
       if (!tenantId) return;
-      if (!id.success || !(await setAutomationStatus(db, { tenantId, automationId: id.data, status }))) {
+      if (!id.success || !(await setAutomationStatus(db, { dispatchConfigured, integrationMode, tenantId, automationId: id.data, status }))) {
         return reply.code(404).send({ error: 'not found' });
       }
       return { status };
@@ -362,16 +375,20 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
     const id = idParam(req);
     if (!tenantId) return;
     if (!id.success) return reply.code(404).send({ error: 'not found' });
-    const r = await withTx(db, async (c) => {
-      const changed = await c.query(
-          `UPDATE social_connections SET sends_paused = false, sends_paused_reason = NULL, status = 'active' WHERE id = $1 AND tenant_id = $2`,
-          [id.data, tenantId],
-        );
-      if (changed.rowCount) await resolveIncident(c, { tenantId, connectionId: id.data, errorClass: 'connection_unauthorized' });
-      return changed;
+    const account = await withTx(db, async (c) => {
+      const existing = (await c.query(
+        'SELECT status, verified_at FROM social_connections WHERE id=$1 AND tenant_id=$2 FOR NO KEY UPDATE', [id.data, tenantId],
+      )).rows[0];
+      if (!existing) return 404;
+      if (existing.status !== 'active' || !existing.verified_at) return 409;
+      await c.query('UPDATE social_connections SET sends_paused=false, sends_paused_reason=NULL WHERE id=$1', [id.data]);
+      await resolveIncident(c, {tenantId, connectionId:id.data, errorClass:'connection_unauthorized'});
+      return 200;
     });
-    if (r.rowCount) deps.onOutbox?.();
-    return r.rowCount ? { sendsPaused: false } : reply.code(404).send({ error: 'not found' });
+    if (account === 404) return reply.code(404).send({error:'Account not found'});
+    if (account === 409) return reply.code(409).send({error:'Reconnect the Instagram account before resuming delivery'});
+    deps.onOutbox?.();
+    return {sendsPaused:false};
   });
 
   // ---- Operator resolution of uncertain sends -------------------------------------------------------

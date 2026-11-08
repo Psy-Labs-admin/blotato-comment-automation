@@ -1,39 +1,31 @@
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildServer } from '../../src/api/server';
-import { loadAccess } from '../../src/api/access';
 import { systemClock } from '../../src/domain/clock';
 import { createTestDb } from '../helpers/db';
+import { createTestAccess } from '../helpers/test-access';
 import { commentEvent, seedTenant } from '../helpers/fixtures';
 
 describe('HTTP trust boundaries', () => {
   let data: Awaited<ReturnType<typeof createTestDb>>;
   let app: FastifyInstance;
-  let demo: FastifyInstance;
   let tenant: Awaited<ReturnType<typeof seedTenant>>;
-  const secret = 'test-only-webhook-signing-secret-is-long-enough';
-  const hash = (s: string) => createHash('sha256').update(s).digest('hex');
+  const auth = createTestAccess();
   beforeAll(async () => {
     data = await createTestDb();
     tenant = await seedTenant(data.db);
-    const access = loadAccess({
-      TENANT_TOKEN_HASHES: JSON.stringify({ [tenant.tenantId]: hash('operator') }),
-      METRICS_TOKEN_HASH: hash('monitor'), WEBHOOK_SIGNING_SECRET: secret,
-    });
-    const deps = { db: data.db, clock: systemClock, logger: false };
-    app = buildServer({ ...deps, access });
-    demo = buildServer(deps);
+    app = buildServer({ db: data.db, clock: systemClock, logger: false, access: auth.access, dispatchConfigured: true, integrationMode: 'gateway' });
   });
-  afterAll(async () => { await app?.close(); await demo?.close(); await data?.drop(); });
+  afterAll(async () => { await app?.close(); await data?.drop(); });
 
   it('gets tenant identity from the verified token and isolates monitoring', async () => {
-    const headers = { authorization: 'Bearer operator' };
+    const headers = auth.operatorHeaders(tenant.tenantId);
     expect((await app.inject({ url: '/runs', headers })).statusCode).toBe(200);
     expect((await app.inject({ url: '/runs', headers: { 'x-tenant-id': tenant.tenantId } })).statusCode).toBe(401);
     expect((await app.inject({ url: '/runs', headers: { ...headers, 'x-tenant-id': randomUUID() } })).statusCode).toBe(401);
     expect((await app.inject({ url: '/metrics', headers })).statusCode).toBe(401);
-    expect((await app.inject({ url: '/metrics', headers: { authorization: 'Bearer monitor' } })).statusCode).toBe(200);
+    expect((await app.inject({ url: '/metrics', headers: auth.metricsHeaders })).statusCode).toBe(200);
     expect((await app.inject({ url: '/demo/workspace', headers })).statusCode).toBe(404);
     expect((await app.inject({ url: '/funnel?since=typo', headers })).statusCode).toBe(400);
   });
@@ -42,7 +34,7 @@ describe('HTTP trust boundaries', () => {
     const event = commentEvent({ accountId: tenant.accountId, from: 'test-person' });
     const raw = JSON.stringify(event, null, 2);
     const ts = String(Math.floor(Date.now() / 1000));
-    const signature = (stamp: string) => 'sha256=' + createHmac('sha256', secret).update(stamp + '.' + raw).digest('hex');
+    const signature = (stamp: string) => 'sha256=' + createHmac('sha256', auth.webhookSecret).update(stamp + '.' + raw).digest('hex');
     const post = (stamp: string, sig: string, body: string) => app.inject({
       method: 'POST', url: '/webhooks/instagram', payload: body,
       headers: { 'content-type': 'application/json', 'x-webhook-timestamp': stamp, 'x-webhook-signature': sig },
@@ -56,8 +48,20 @@ describe('HTTP trust boundaries', () => {
     expect((await post(ts, signature(ts), raw)).json().duplicate).toBe(true);
   });
 
-  it('rejects a foreign Host or browser Origin on the local demo', async () => {
-    expect((await demo.inject({ url: '/health', headers: { host: 'malicious.example' } })).statusCode).toBe(403);
-    expect((await demo.inject({ url: '/runs', headers: { host: 'localhost', origin: 'https://malicious.example', 'x-tenant-id': tenant.tenantId } })).statusCode).toBe(403);
+  it('rejects signed gateway events for a native account before creating any inbox or opt-out state', async () => {
+    const native = await seedTenant(data.db, {name:'Native binding'});
+    await data.db.query("UPDATE social_connections SET integration_kind='native' WHERE id=$1", [native.connectionId]);
+    const inputs = [
+      commentEvent({accountId:native.accountId,from:'participant'}),
+      {type:'message.received', accountId:native.accountId, messageId:'stop', from:{id:'participant'}, text:'STOP',occurredAt:new Date().toISOString()},
+    ];
+    for (const input of inputs) expect((await app.inject({method:'POST',url:'/webhooks/instagram', ...auth.signedWebhook(input)})).statusCode).toBe(404);
+    expect((await data.db.query('SELECT id FROM inbox_events WHERE connection_id=$1', [native.connectionId])).rowCount).toBe(0);
+    expect((await data.db.query('SELECT id FROM conversations WHERE connection_id=$1', [native.connectionId])).rowCount).toBe(0);
+  });
+
+  it('rejects account IDs or tenant IDs as substitutes for access credentials', async () => {
+    expect((await app.inject({ url: '/runs', headers: { 'x-tenant-id': tenant.tenantId, 'x-account-id': tenant.accountId } })).statusCode).toBe(401);
+    expect((await app.inject({ url: '/runs', headers: { authorization: 'Bearer ' + tenant.tenantId } })).statusCode).toBe(401);
   });
 });

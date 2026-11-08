@@ -2,7 +2,7 @@
 
 ## OpenTelemetry tracing
 
-Tracing is disabled until an OTLP endpoint is explicitly configured. The default local demo starts no telemetry exporter and makes no telemetry network requests.
+Tracing is disabled until an OTLP endpoint is explicitly configured. The default API starts no telemetry exporter and makes no telemetry network requests.
 
 The implementation uses the official OpenTelemetry JavaScript SDK and OTLP HTTP JSON exporter. Set the collector endpoint when starting the application.
 
@@ -30,11 +30,11 @@ The exporter endpoint rules and manual instrumentation follow the official OpenT
 
 ## Reproducible load check
 
-The load check starts a separate HTTP API, Temporal dev server, task queue and HTTP simulators on ephemeral loopback ports. It creates and migrates a throwaway PostgreSQL database, then drops that database during cleanup. It leaves the running local demo alone. `DATABASE_ADMIN_URL` must point to a local PostgreSQL administrator account with permission to create databases.
+The load check starts a separate HTTP API, Temporal dev server, task queue and HTTP simulators on ephemeral loopback ports. It creates and migrates a throwaway PostgreSQL database, then drops that database during cleanup. It leaves the operational workspace alone. `DATABASE_ADMIN_URL` must point to a local PostgreSQL administrator account with permission to create databases.
 
 ```bash
 DATABASE_ADMIN_URL=postgres://postgres:postgres@localhost:55432/postgres \
-npm run load:check
+npm run test:load
 ```
 
 Node 24 or later is required. A default run sends 1,000 comment deliveries at 100 deliveries per second, waits for the resulting questions to become active, then sends 1,000 email-message deliveries at the same rate. Every fifth delivery repeats the preceding event. This produces 800 conversations, 1,600 distinct inbox events, 800 leads and 2,400 provider sends. The account's business send budget is raised only inside this throwaway test fixture.
@@ -62,8 +62,8 @@ The scheduler offers requests on a fixed cadence while earlier requests remain i
 Settings can shorten a smoke check or save a report.
 
 ```bash
-LOAD_RATE=25 LOAD_DELIVERIES=50 npm run load:check
-LOAD_REPORT_PATH=/tmp/blotato-load.json npm run load:check
+LOAD_RATE=25 LOAD_DELIVERIES=50 npm run test:load
+LOAD_REPORT_PATH=/tmp/blotato-load.json npm run test:load
 ```
 
 `LOAD_DRAIN_TIMEOUT_MS` defaults to 120,000 milliseconds per phase. The default test runs ten seconds of offered traffic per phase, followed by whatever drain time the system needs within that bound. Repeat measurements on the target infrastructure to assess its capacity.

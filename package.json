@@ -8,16 +8,14 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "FAKES=1 tsx src/main.ts",
-    "start": "tsx src/main.ts",
+    "dev": "node --env-file-if-exists=.env --import tsx src/main.ts",
+    "build": "node scripts/build.cjs",
+    "start": "node --env-file-if-exists=.env dist/main.js",
     "migrate": "tsx src/storage/migrate.ts",
-    "seed": "tsx scripts/seed.ts",
-    "demo": "tsx scripts/demo.ts",
-    "load:check": "tsx scripts/load-check.ts",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
-    "typecheck": "tsc --noEmit",
-    "dev:embedded": "FAKES=1 TEMPORAL_ADDRESS=embedded tsx src/main.ts"
+    "test:load": "tsx tests/load/load-check.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@opentelemetry/api": "1.10.0",

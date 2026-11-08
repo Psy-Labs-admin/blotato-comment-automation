@@ -4,7 +4,7 @@ import { commentEvent, createAutomation, seedTenant } from '../helpers/fixtures'
 import { ingestEvent } from '../../src/ingest/ingest';
 import { routeEvent } from '../../src/ingest/router';
 import { systemClock } from '../../src/domain/clock';
-import { startFakeInstagram, type FakeInstagram } from '../../src/fakes/fake-instagram';
+import { startFakeInstagram, type FakeInstagram } from '../fixtures/providers/fake-instagram';
 import { HttpMetadataClient } from '../../src/metadata/client';
 import { metadataHandler } from '../../src/metadata/hydrate';
 import type { OutboxRow } from '../../src/relay/relay';

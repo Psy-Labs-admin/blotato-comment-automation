@@ -11,12 +11,14 @@ import type { OutboxHandler, OutboxRow } from './relay';
 /** After this many consecutive failures a CRM outage becomes an incident (the dialogue is unaffected). */
 const CRM_INCIDENT_AFTER = 3;
 
-export function integrationHandlers(o: { db: Pool; crm: CrmClient; notifier: AlertNotifier; consoleUrl?: string }): {
+export function integrationHandlers(o: { db: Pool; crm?: CrmClient; notifier?: AlertNotifier; consoleUrl?: string }): {
   'crm.lead_captured': OutboxHandler;
   'alert.notify': OutboxHandler;
 } {
   return {
     'crm.lead_captured': async (row) => {
+      const crm = o.crm;
+      if (!crm) return { retryInMs: 60_000, reason: 'CRM delivery is not configured' };
       const { leadId } = row.payload as LeadCapturedPayload;
       const lead = (
         await o.db.query(
@@ -29,7 +31,7 @@ export function integrationHandlers(o: { db: Pool; crm: CrmClient; notifier: Ale
       if (!lead) throw new Error(`lead ${leadId} not found`);
       try {
         // The outbox key doubles as the CRM idempotency key: redelivery upserts the same record.
-        await o.crm.upsertLead(
+        await crm.upsertLead(
           { eventId: row.idempotencyKey, leadId, tenantId: lead.tenant_id, email: lead.email, source: { runId: lead.run_id, commentId: lead.comment_id, mediaId: lead.media_id } },
           row.idempotencyKey,
         );
@@ -67,6 +69,8 @@ export function integrationHandlers(o: { db: Pool; crm: CrmClient; notifier: Ale
     },
 
     'alert.notify': async (row) => {
+      const notifier = o.notifier;
+      if (!notifier) return { retryInMs: 60_000, reason: 'Alert delivery is not configured' };
       const { incidentId, kind } = row.payload as AlertNotifyPayload;
       const inc = (
         await o.db.query(
@@ -77,7 +81,7 @@ export function integrationHandlers(o: { db: Pool; crm: CrmClient; notifier: Ale
         )
       ).rows[0];
       if (!inc) return;
-      await o.notifier.notify(formatIncident(inc, kind, o.consoleUrl));
+      await notifier.notify(formatIncident(inc, kind, o.consoleUrl));
     },
   };
 }

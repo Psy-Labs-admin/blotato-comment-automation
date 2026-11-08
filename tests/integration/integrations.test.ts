@@ -31,6 +31,14 @@ describe('CRM delivery recovery', () => {
     return { tenant, lead, row };
   }
 
+  it('retains pending work when optional CRM and alert delivery have not been configured', async () => {
+    const { row, lead } = await pendingLead();
+    const handlers = integrationHandlers({ db: t.db });
+    expect(await handlers['crm.lead_captured'](row)).toMatchObject({ retryInMs: 60_000 });
+    expect((await t.db.query('SELECT crm_status FROM leads WHERE id = $1', [lead.id])).rows[0].crm_status).toBe('pending');
+    expect(await handlers['alert.notify']({ ...row, kind: 'alert.notify', payload: { incidentId: 'unread-without-delivery', kind: 'opened' } })).toMatchObject({ retryInMs: 60_000 });
+  });
+
   it('does not reopen a CRM incident for a stale failure after another handler synced the lead', async () => {
     const { db } = t;
     const { tenant, row } = await pendingLead();
@@ -59,14 +67,18 @@ describe('CRM delivery recovery', () => {
     try {
       await c.query('BEGIN');
       await c.query(`SELECT id FROM conversations WHERE id = $1 FOR UPDATE`, [lead.conversation_id]);
+      const holderPid = (await c.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
       const handler = integrationHandlers({ db, crm: { upsertLead: async () => {} }, notifier: { notify: async () => {} } })['crm.lead_captured'];
-      delivery = handler(row);
-      const deadline = Date.now() + 2_000;
+      let deliveryFinished = false;
+      delivery = handler(row).finally(() => { deliveryFinished = true; });
+      const deadline = Date.now() + 10_000;
       for (;;) {
         const waiting = await db.query(
-          `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+          `SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid))`,
+          [holderPid],
         );
         if (waiting.rowCount) break;
+        if (deliveryFinished) throw new Error('CRM delivery finished without the required conversation lock');
         if (Date.now() > deadline) throw new Error('CRM handler did not wait for the conversation lock');
         await new Promise((resolve) => setTimeout(resolve, 10));
       }

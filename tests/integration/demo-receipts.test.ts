@@ -2,9 +2,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { it, expect } from 'vitest';
-import { startFakeInstagram } from '../../src/fakes/fake-instagram';
-import { startFakeCrm } from '../../src/fakes/fake-crm';
-import { DemoReceipts } from '../../src/fakes/receipts';
+import { startFakeInstagram } from '../fixtures/providers/fake-instagram';
+import { startFakeCrm } from '../fixtures/providers/fake-crm';
+import { DemoReceipts } from '../fixtures/providers/receipts';
 import { HttpInstagramAdapter } from '../../src/adapters/instagram';
 
 it('retains positive provider evidence and idempotent CRM records when the local simulators restart', async () => {

@@ -22,15 +22,15 @@ export class TelegramNotifier implements AlertNotifier {
   }
 }
 
-/** Generic webhook sink (used with the local fake when Telegram is not configured). */
+/** Authenticated operational webhook delivery. */
 export class HttpAlertSink implements AlertNotifier {
-  constructor(private readonly url: string) {}
+  constructor(private readonly url: string, private readonly opts: { token?: string } = {}) {}
 
   async notify(text: string): Promise<void> {
     const res = await fetch(`${this.url}/alerts`, {
       method: 'POST',
       redirect: 'error',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...(this.opts.token ? { authorization: 'Bearer ' + this.opts.token } : {}) },
       body: JSON.stringify({ text }),
       signal: AbortSignal.timeout(5_000),
     });

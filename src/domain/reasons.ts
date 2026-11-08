@@ -31,6 +31,8 @@ export const Reason = {
   PROVIDER_REJECTED: 'provider_rejected',
   PROVIDER_UNAUTHORIZED: 'provider_unauthorized',
   PROVIDER_THROTTLED: 'provider_throttled',
+  PROVIDER_UNAVAILABLE: 'provider_unavailable',
+  CREDENTIALS_UNAVAILABLE: 'credentials_unavailable',
   PROVIDER_NO_CONFIRMATION: 'provider_no_confirmation',
   ATTEMPT_OUTCOME_LOST: 'attempt_outcome_lost',
   DEFERRAL_BUDGET_EXHAUSTED: 'deferral_budget_exhausted',

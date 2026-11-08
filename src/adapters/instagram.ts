@@ -6,7 +6,7 @@ export interface SendRequest {
   commentId?: string;
   recipientId?: string;
   text: string;
-  /** Our intent id. Sent along so a provider (or the fake) that supports lookups can reconcile. */
+  /** Our intent id. Sent along so a integration that supports lookups can reconcile. */
   clientRef: string;
 }
 
@@ -17,7 +17,7 @@ export interface SendRequest {
  */
 export type SendOutcome =
   | { status: 'accepted'; providerMessageId: string; httpStatus: number }
-  | { status: 'rejected'; code: string; httpStatus: number }
+  | { status: 'rejected'; code: string; httpStatus: number; credentialGeneration?: { connectionId: string; version: number } }
   | { status: 'not_sent'; code: string; retryAfterMs: number; httpStatus?: number }
   | { status: 'unknown'; code: string; httpStatus?: number };
 
@@ -42,7 +42,7 @@ const THROTTLE_ERROR_CODES = new Set([4, 17, 32, 613]);
 export class HttpInstagramAdapter implements SocialPlatform {
   constructor(
     private readonly baseUrl: string,
-    private readonly opts: { timeoutMs: number } = { timeoutMs: 10_000 },
+    private readonly opts: { timeoutMs: number; token?: string } = { timeoutMs: 10_000 },
   ) {}
 
   async send(req: SendRequest): Promise<SendOutcome> {
@@ -51,7 +51,7 @@ export class HttpInstagramAdapter implements SocialPlatform {
     try {
       res = await fetch(`${this.baseUrl}${path}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...(this.opts.token ? { authorization: 'Bearer ' + this.opts.token } : {}) },
         body: JSON.stringify(body),
         redirect: 'manual',
         signal: AbortSignal.timeout(this.opts.timeoutMs),
@@ -90,7 +90,7 @@ export class HttpInstagramAdapter implements SocialPlatform {
   async lookupByClientRef(accountId: string, clientRef: string): Promise<LookupResult> {
     const res = await fetch(
       `${this.baseUrl}/v1/${encodeURIComponent(accountId)}/messages?client_ref=${encodeURIComponent(clientRef)}`,
-      { signal: AbortSignal.timeout(this.opts.timeoutMs), redirect: 'manual' },
+      { signal: AbortSignal.timeout(this.opts.timeoutMs), redirect: 'manual', headers: this.opts.token ? { authorization: 'Bearer ' + this.opts.token } : {} },
     );
     if (!res.ok) throw new Error(`lookup failed: HTTP ${res.status}`);
     const json: any = await res.json();

@@ -44,7 +44,9 @@ describe('CRM outage, revoked access and alerting', () => {
     expect(second).toMatchObject({ outcome: 'connection_inactive', runId: null });
     expect(h.ig.sent().length).toBe(sentBefore);
 
-    // Reconnect -> incident resolved.
+    // Operator resume cannot claim an account was reconnected. The signed integration confirms it first.
+    expect((await h.request('POST', `/connections/${h.tenant.connectionId}/resume`)).status).toBe(409);
+    expect((await h.provisionAccount('active')).status).toBe(200);
     expect((await h.request('POST', `/connections/${h.tenant.connectionId}/resume`)).status).toBe(200);
     await h.waitFor(async () => h.alerts.received().find((t) => t.startsWith('[RESOLVED] Instagram account access')), 10_000, 'resolved');
   });

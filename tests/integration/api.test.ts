@@ -1,3 +1,4 @@
+import { createTestAccess } from '../helpers/test-access';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
@@ -14,11 +15,12 @@ describe('HTTP API', () => {
   let tn: Awaited<ReturnType<typeof seedTenant>>;
   let other: Awaited<ReturnType<typeof seedTenant>>;
   let automationId: string;
+  const auth = createTestAccess();
 
   beforeAll(async () => {
     t = await createTestDb();
     db = t.db;
-    app = buildServer({ db, clock: systemClock, logger: false });
+    app = buildServer({ db, access: auth.access, dispatchConfigured: true, integrationMode: 'gateway', clock: systemClock, logger: false });
     tn = await seedTenant(db, { name: 'acme' });
     other = await seedTenant(db, { name: 'globex' });
   });
@@ -27,8 +29,8 @@ describe('HTTP API', () => {
     await t?.drop();
   });
 
-  const as = (tenantId: string) => ({ 'x-tenant-id': tenantId });
-  const webhook = (payload: unknown) => app.inject({ method: 'POST', url: '/webhooks/instagram', payload: payload as any });
+  const as = auth.operatorHeaders;
+  const webhook = (payload: unknown) => app.inject({ method: 'POST', url: '/webhooks/instagram', ...auth.signedWebhook(payload) });
 
   it('publishes an automation and rejects an invalid definition with readable issues', async () => {
     const bad = await app.inject({
@@ -181,7 +183,7 @@ describe('HTTP API', () => {
   });
 
   it('exposes operational gauges for Prometheus', async () => {
-    const res = await app.inject({ method: 'GET', url: '/metrics' });
+    const res = await app.inject({ method: 'GET', url: '/metrics', headers: auth.metricsHeaders });
     expect(res.statusCode).toBe(200);
     expect(res.body).toMatch(/outbox_oldest_pending_seconds/);
     expect(res.body).toMatch(/intents_unknown/);

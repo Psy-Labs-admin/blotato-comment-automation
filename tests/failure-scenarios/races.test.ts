@@ -32,7 +32,7 @@ describe('races between replies, signals, timers and acknowledgements', () => {
   });
 
   it('email accepted in time but its wake-up signal is stuck: the timer path still finds it (not expired)', async () => {
-    await publishVersion(h.db, { tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '3s' }) });
+    await publishVersion(h.db, { dispatchConfigured: true, integrationMode: 'gateway', tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '3s' }) });
     const { runId } = await h.comment('stuck_signal');
     await h.waitForRun(runId!, 'waiting_input');
     await new Promise((r) => setTimeout(r, 500)); // let the workflow park on its deadline timer
@@ -52,11 +52,11 @@ describe('races between replies, signals, timers and acknowledgements', () => {
       10_000,
       'stale signal drained',
     );
-    await publishVersion(h.db, { tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '30s' }) });
+    await publishVersion(h.db, { dispatchConfigured: true, integrationMode: 'gateway', tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '30s' }) });
   });
 
   it('an email that arrives exactly as the deadline passes is either consumed or the run expires — never both', async () => {
-    await publishVersion(h.db, { tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '2s' }) });
+    await publishVersion(h.db, { dispatchConfigured: true, integrationMode: 'gateway', tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '2s' }) });
     const { runId } = await h.comment('photo_finish');
     const w = await h.waitFor(async () => (await h.wait(runId!))?.deadline ?? undefined, 10_000, 'deadline');
     const msLeft = new Date(w).getTime() - Date.now();
@@ -72,6 +72,6 @@ describe('races between replies, signals, timers and acknowledgements', () => {
       expect(lead).toBeUndefined();
       expect(h.messagesFor('photo_finish')).toHaveLength(0);
     }
-    await publishVersion(h.db, { tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '30s' }) });
+    await publishVersion(h.db, { dispatchConfigured: true, integrationMode: 'gateway', tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '30s' }) });
   });
 });

@@ -43,7 +43,7 @@ describe('comment automation workflow (real Temporal + Postgres + HTTP fakes)', 
   });
 
   it('no answer before the deadline expires the run and releases the conversation', async () => {
-    await publishVersion(h.db, { tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '2s' }) });
+    await publishVersion(h.db, { dispatchConfigured: true, integrationMode: 'gateway', tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '2s' }) });
     const { runId } = await h.comment('carol');
     const run = await h.waitForRun(runId!, undefined, 15_000);
     expect(run.status).toBe('expired');
@@ -54,7 +54,7 @@ describe('comment automation workflow (real Temporal + Postgres + HTTP fakes)', 
   });
 
   it('a valid reply interrupts a throttled clarification and completes without sending that clarification', async () => {
-    await publishVersion(h.db, { tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '30s' }) });
+    await publishVersion(h.db, { dispatchConfigured: true, integrationMode: 'gateway', tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '30s' }) });
     const platform = h.deps.platform;
     h.deps.platform = {
       send: async (request) => request.text.includes("doesn't look like")
@@ -76,10 +76,10 @@ describe('comment automation workflow (real Temporal + Postgres + HTTP fakes)', 
   });
 
   it('a version published while a run waits does not change that run; new runs use it', async () => {
-    await publishVersion(h.db, { tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '30s', link: 'https://example.com/v-old' }) });
+    await publishVersion(h.db, { dispatchConfigured: true, integrationMode: 'gateway', tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '30s', link: 'https://example.com/v-old' }) });
     const { runId: oldRun } = await h.comment('dave');
     await h.waitForRun(oldRun!, 'waiting_input');
-    await publishVersion(h.db, { tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '30s', link: 'https://example.com/v-new' }) });
+    await publishVersion(h.db, { dispatchConfigured: true, integrationMode: 'gateway', tenantId: h.tenant.tenantId, automationId: h.automation.automationId, definition: pricingWith({ timeout: '30s', link: 'https://example.com/v-new' }) });
     await h.dm('dave', 'dave@example.com');
     await h.waitForRun(oldRun!);
     expect(h.ig.sent().find((m) => m.recipientId === 'dave')!.text).toContain('v-old');

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Pool } from 'pg';
 import { createTestDb } from '../helpers/db';
 import { commentEvent, createAutomation, seedTenant } from '../helpers/fixtures';
-import { startFakeInstagram, type FakeInstagram } from '../../src/fakes/fake-instagram';
+import { startFakeInstagram, type FakeInstagram } from '../fixtures/providers/fake-instagram';
 import { HttpInstagramAdapter } from '../../src/adapters/instagram';
 import { ingestEvent } from '../../src/ingest/ingest';
 import { routeEvent } from '../../src/ingest/router';
@@ -30,7 +30,7 @@ describe('send ledger and policy gate', () => {
   });
   beforeEach(() => {
     ig.reset();
-    deps = { db, clock: systemClock, platform: new HttpInstagramAdapter(ig.url, { timeoutMs: 400 }) };
+    deps = { db, integrationMode: 'gateway', clock: systemClock, platform: new HttpInstagramAdapter(ig.url, { timeoutMs: 400 }) };
   });
 
   async function startRun(o: { capabilities?: Partial<Capabilities>; occurredAt?: string; tn?: Awaited<ReturnType<typeof seedTenant>> } = {}) {
@@ -156,13 +156,15 @@ describe('send ledger and policy gate', () => {
   });
 
   it('zero account budget blocks even the first send in a new window', async () => {
-    const { runId } = await startRun({ capabilities: { sendsPerWindow: 0 } });
+    const { runId, tn } = await startRun();
+    await db.query("UPDATE social_connections SET capabilities = capabilities || $2::jsonb WHERE id = $1", [tn.connectionId, JSON.stringify({ sendsPerWindow: 0 })]);
     expect(await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 })).toMatchObject({ status: 'deferred', reason: Reason.RATE_LIMITED });
     expect(ig.sent()).toHaveLength(0);
   });
 
   it('an invalid zero-duration budget window blocks before any send', async () => {
-    const { runId } = await startRun({ capabilities: { budgetWindowSeconds: 0 } });
+    const { runId, tn } = await startRun();
+    await db.query("UPDATE social_connections SET capabilities = capabilities || $2::jsonb WHERE id = $1", [tn.connectionId, JSON.stringify({ budgetWindowSeconds: 0 })]);
     expect(await executeSend(deps, { runId, stepId: 'public_reply', actionNo: 1 })).toMatchObject({ status: 'blocked', reason: Reason.CAPABILITY_UNKNOWN });
     expect(ig.sent()).toHaveLength(0);
   });

@@ -449,7 +449,7 @@ explicitly not part of the design.
 
 - **Timeline** (`GET /runs/:id/timeline`, `src/timeline.ts`) answers "why did this run stop?" in
   plain language. Every line is a recorded fact. "Delivered" never appears, because Instagram only
-  tells us it *accepted* a message. Example from the demo:
+  tells us it *accepted* a message. Example of a timeline for a completed run:
   ```
   Comment received on post post_spring_menu
   Rule "pricing" matched; published version 1 started
@@ -513,11 +513,9 @@ Illustrative profile (an assumption, not Blotato data): 100k inbound events/day,
 
 Implemented and tested here: everything in §§2–13 except as listed below.
 
-- **Real Instagram adapter**: the HTTP adapter targets a fake shaped like the Graph API. The real
-  integration already exists in Blotato and would sit behind the same `SocialPlatform` interface.
-  Its capability values must be confirmed (§10).
-- **Operator authentication**: non-demo bearer tokens are bound to a tenant. The production identity provider and credential rotation belong to the host product.
-- **Webhook authenticity**: the integration verifies the original platform payload. The API verifies a timestamped HMAC over the normalized envelope.
+- **Instagram**: the native adapter uses Instagram Login and the versioned Graph API. Webhooks are verified before normalization. An authenticated upstream integration remains an optional deployment mode. See [Instagram setup](instagram.md).
+- **Operator authentication**: bearer tokens and browser sessions are bound to a tenant. The production identity provider and credential rotation belong to the host product.
+- **Webhook authenticity**: the native endpoint verifies Meta’s signature over the raw body. The optional normalized endpoint accepts a separate timestamped HMAC from the trusted integration.
 - **Retention and storage**: opt-in inbox redaction preserves active waits and unresolved sends. The operator must provision encrypted storage for application data and backups. Lead deletion and backup retention remain deployment policies.
 - **Tracing**: opt-in OTLP traces cover HTTP, routing, activities and relay delivery. Audit identifiers provide the lookup path for an individual conversation. See [observability](observability.md).
 - **Workflow upgrades**: a recorded pre-change Temporal history is replayed in the suite. Optional pinned Worker Deployment Versioning is exercised on a compatible Temporal dev server. See [worker upgrades](worker-upgrades.md).

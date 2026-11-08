@@ -2,10 +2,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { HttpInstagramAdapter } from '../../src/adapters/instagram';
 import { HttpCrmClient } from '../../src/adapters/crm';
 import { HttpAlertSink } from '../../src/adapters/alerts';
-import { startFakeInstagram, type FakeInstagram } from '../../src/fakes/fake-instagram';
-import { startFakeCrm, type FakeCrm } from '../../src/fakes/fake-crm';
-import { startFakeAlertSink, type FakeAlertSink } from '../../src/fakes/fake-alert-sink';
-import { sendJson, startServer } from '../../src/fakes/http';
+import { startFakeInstagram, type FakeInstagram } from '../fixtures/providers/fake-instagram';
+import { startFakeCrm, type FakeCrm } from '../fixtures/providers/fake-crm';
+import { startFakeAlertSink, type FakeAlertSink } from '../fixtures/providers/fake-alert-sink';
+import { sendJson, startServer } from '../fixtures/providers/http';
 
 describe('Instagram adapter against the fault-injecting fake', () => {
   let ig: FakeInstagram;

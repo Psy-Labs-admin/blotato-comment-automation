@@ -12,7 +12,9 @@ export type IngestResult =
   | { status: 'accepted'; eventId: string; duplicate: boolean }
   | { status: 'rejected'; httpStatus: 400 | 404; reason: string };
 
+class AccountBindingChanged extends Error {}
 export interface IngestDeps {
+  source?: 'native' | 'gateway';
   db: Pool;
   clock: Clock;
 }
@@ -32,10 +34,11 @@ export async function ingestEvent(deps: IngestDeps, raw: unknown): Promise<Inges
   }
   const e = parsed.data;
 
+  const source = deps.source ?? 'gateway';
   return withTx(deps.db, async (c) => {
     const conn = await c.query(
-      `SELECT id, tenant_id, external_account_id FROM social_connections WHERE platform = 'instagram' AND external_account_id = $1`,
-      [e.accountId],
+      `SELECT id, tenant_id, external_account_id FROM social_connections WHERE platform = 'instagram' AND external_account_id = $1 AND integration_kind = $2`,
+      [e.accountId, source],
     );
     if (!conn.rowCount) return { status: 'rejected', httpStatus: 404, reason: 'unknown_account' } as const;
     const { id: connectionId, tenant_id: tenantId, external_account_id: ownAccount } = conn.rows[0];
@@ -54,6 +57,18 @@ export async function ingestEvent(deps: IngestDeps, raw: unknown): Promise<Inges
     const seq = Number(conv.last_inbound_seq) + 1;
     const fromSelf = e.from.id === ownAccount || (e.type === 'message.received' && e.isEcho === true);
     const stop = !fromSelf && e.type === 'message.received' && isStopCommand(e.text);
+    // A connector switch can race the first lookup. Follow the dispatch lock order:
+    // conversation first, then account. A rejected race rolls back even a newly created conversation.
+    const binding = (await c.query(
+      `SELECT sc.status, sc.verified_at, ig.expires_at FROM social_connections sc
+       LEFT JOIN instagram_credentials ig ON ig.connection_id=sc.id
+       WHERE sc.id=$1 AND sc.integration_kind=$2 FOR SHARE OF sc`, [connectionId, source],
+    )).rows[0];
+    if (!binding || (source === 'gateway' && binding.expires_at) ||
+        (source === 'native' && (binding.status === 'disconnected' || !binding.expires_at ||
+         (!stop && (binding.status !== 'active' || !binding.verified_at || binding.expires_at <= now))))) {
+      throw new AccountBindingChanged();
+    }
     const preRouted = fromSelf ? Reason.IGNORED_SELF : stop ? Reason.STOP_COMMAND : null;
 
     const inserted = await c.query(
@@ -101,5 +116,8 @@ export async function ingestEvent(deps: IngestDeps, raw: unknown): Promise<Inges
       }
     }
     return { status: 'accepted', eventId, duplicate: false } as const;
+  }).catch((error: unknown) => {
+    if (error instanceof AccountBindingChanged) return { status: 'rejected', httpStatus: 404, reason: 'unknown_account' } as const;
+    throw error;
   });
 }

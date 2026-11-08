@@ -1,7 +1,7 @@
 import type { DemoReceipts } from './receipts';
 import { randomUUID } from 'node:crypto';
-import type { SendKind } from '../domain/types';
-import type { MetadataResult } from '../metadata/client';
+import type { SendKind } from '../../../src/domain/types';
+import type { MetadataResult } from '../../../src/metadata/client';
 import { sendJson, startServer } from './http';
 
 /**

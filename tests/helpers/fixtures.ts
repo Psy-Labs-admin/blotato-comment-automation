@@ -1,6 +1,7 @@
+import { createConnection } from './account';
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
-import { createAutomation as createAutomationRow, createConnection, createTenant } from '../../src/storage/admin';
+import { createAutomation as createAutomationRow, createTenant } from '../../src/storage/admin';
 import type { Capabilities } from '../../src/domain/types';
 import { pricingDefinition } from './definitions';
 
@@ -11,6 +12,10 @@ export async function seedTenant(
   const accountId = o.accountId ?? `ig_${randomUUID().slice(0, 8)}`;
   const tenantId = await createTenant(db, o.name ?? 'acme');
   const connectionId = await createConnection(db, { tenantId, accountId, capabilities: o.capabilities });
+  await db.query(
+    "UPDATE social_connections SET integration_kind = 'gateway', verified_at = now(), integration_revision = 1, integration_updated_at = now(), display_name = $2 WHERE id = $1",
+    [connectionId, o.name ?? 'Test account'],
+  );
   return { tenantId, connectionId, accountId };
 }
 
@@ -21,6 +26,7 @@ export async function createAutomation(
   o: { priority?: number; cooldownSeconds?: number; name?: string } = {},
 ) {
   return createAutomationRow(db, {
+    dispatchConfigured: true, integrationMode: 'gateway',
     tenantId: t.tenantId,
     connectionId: t.connectionId,
     name: o.name ?? 'pricing',

@@ -14,11 +14,12 @@ export interface MetadataClient {
 
 /** Reads the existing integration's normalized metadata contract. */
 export class HttpMetadataClient implements MetadataClient {
-  constructor(private readonly baseUrl: string, private readonly timeoutMs = 5000) {}
+  constructor(private readonly baseUrl: string, private readonly timeoutMs = 5000, private readonly token?: string) {}
 
   async fetchPost(accountId: string, mediaId: string): Promise<MetadataResult> {
     const response = await fetch(`${this.baseUrl}/v1/${encodeURIComponent(accountId)}/media/${encodeURIComponent(mediaId)}`, {
       redirect: 'error',
+      headers: this.token ? { authorization: 'Bearer ' + this.token } : {},
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (response.status === 403) return { status: 'denied' };

@@ -1,3 +1,5 @@
+export type IntegrationMode = 'native' | 'gateway' | 'unconfigured';
+
 export type RunOutcome = 'completed' | 'expired' | 'cancelled' | 'failed';
 export type RunStatus = 'starting' | 'running' | 'waiting_input' | 'blocked_unknown' | RunOutcome;
 
@@ -21,15 +23,6 @@ export interface Capabilities {
   reconciliation: 'lookup_by_client_ref' | 'none';
 }
 
-export const DEFAULT_CAPABILITIES: Capabilities = {
-  privateReplyWindowHours: 7 * 24,
-  messagingWindowHours: 24,
-  sendsPerWindow: 200,
-  budgetWindowSeconds: 3600,
-  recipientHourlyLimit: 10,
-  reconciliation: 'none',
-};
-
 const NUMERIC_CAPABILITIES = [
   'privateReplyWindowHours',
   'messagingWindowHours',
@@ -41,8 +34,7 @@ const NUMERIC_CAPABILITIES = [
 /**
  * Strict reading of a stored adapter contract: only well-formed values survive. Nothing is filled
  * in from defaults here — a capability that is unknown for an account must forbid the sends that
- * depend on it (see `missingCapabilities`). Defaults are applied once, explicitly, when a
- * connection is created.
+ * depend on it (see `missingCapabilities`). Confirmed limits are stored when a connection is verified.
  */
 export function parseCapabilities(raw: unknown): Partial<Capabilities> {
   const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;

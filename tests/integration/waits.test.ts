@@ -3,7 +3,7 @@ import type { Pool } from 'pg';
 import { createTestDb } from '../helpers/db';
 import { commentEvent, createAutomation, dmEvent, seedTenant } from '../helpers/fixtures';
 import { pricingWith } from '../helpers/definitions';
-import { startFakeInstagram, type FakeInstagram } from '../../src/fakes/fake-instagram';
+import { startFakeInstagram, type FakeInstagram } from '../fixtures/providers/fake-instagram';
 import { HttpInstagramAdapter } from '../../src/adapters/instagram';
 import { ingestEvent } from '../../src/ingest/ingest';
 import { routeEvent } from '../../src/ingest/router';
@@ -33,7 +33,7 @@ describe('waits, input consumption and leads', () => {
   });
   beforeEach(() => {
     ig.reset();
-    deps = { db, clock: systemClock, platform: new HttpInstagramAdapter(ig.url, { timeoutMs: 2_000 }) };
+    deps = { db, integrationMode: 'gateway', clock: systemClock, platform: new HttpInstagramAdapter(ig.url, { timeoutMs: 2_000 }) };
   });
 
   /** A run that has done its public reply and prepared (not yet sent) the email question. */

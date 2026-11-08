@@ -3,163 +3,278 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Conversations · Blotato</title>
+    <title>Automations · Blotato</title>
+    <link
+      rel="preload"
+      href="/console-assets/InterVariable-latcyr.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
     <link rel="stylesheet" href="/console.css" />
     <script src="/console.js" defer></script>
   </head>
   <body>
-    <a class="skip" href="#main">Skip to conversations</a>
-    <header class="topbar">
-      <a class="brand" href="/console" aria-label="Blotato conversations home"
-        >blotato<span>Conversations</span></a
-      >
-      <div class="session" id="session" hidden>
-        <span id="workspace-label"></span
-        ><button id="disconnect" class="quiet">Disconnect</button>
-      </div>
-    </header>
-    <main id="main">
-      <section class="login" id="login" aria-labelledby="login-title">
-        <div class="login-intro">
-          <h1 id="login-title">Follow every conversation.</h1>
-          <p>
-            Inspect automation runs, see what happened, and resolve messages
-            that need attention.
-          </p>
-        </div>
-        <form id="connect-form" class="connect-form">
-          <h2>Open your workspace</h2>
-          <button id="open-demo" type="button" hidden>
-            Open demo workspace
+    <a class="skip" href="#main">Skip to content</a>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a href="#automations" class="brand" aria-label="Blotato home"
+          >blotato<span>.</span></a
+        >
+        <nav aria-label="Workspace" id="navigation" hidden>
+          <a href="#automations" data-view="automations">Automations</a>
+          <a href="#conversations" data-view="conversations"
+            >Conversations<span
+              id="nav-attention"
+              class="nav-count"
+              hidden
+            ></span
+          ></a>
+          <a href="#accounts" data-view="accounts">Accounts</a>
+        </nav>
+        <div class="sidebar-bottom" id="workspace-session" hidden>
+          <button type="button" id="sign-out" class="text-button">
+            Sign out
           </button>
-          <label for="token">Access token</label
-          ><input
-            id="token"
-            name="token"
-            type="password"
-            autocomplete="off"
-            placeholder="Enter your workspace access token"
-          />
-          <details>
-            <summary>Local development</summary>
-            <label for="tenant">Workspace ID</label
-            ><input
-              id="tenant"
-              name="tenant"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="Tenant UUID for unsecured local use"
-            />
-          </details>
-          <p class="help">
-            Use the credentials supplied by your administrator. Credentials stay
-            in this tab until you disconnect or reload.
-          </p>
-          <button class="primary" type="submit" id="connect-button">
-            Connect workspace
-          </button>
-          <p id="login-error" class="error" role="alert" hidden></p>
-        </form>
-      </section>
-      <div id="workspace" hidden>
-        <div class="page-title">
-          <div><h1>Conversations</h1></div>
-          <div class="refresh">
-            <span id="updated"></span><button id="refresh">Refresh</button>
-          </div>
         </div>
-        <p id="notice" class="notice" role="status" hidden></p>
-        <p id="error" class="error" role="alert" hidden></p>
-        <section
-          aria-label="Automation funnel"
-          class="funnel"
-          id="funnel"
-        ></section>
-        <div class="toolbar">
-          <div>
-            <label for="status">Run status</label
-            ><select id="status">
-              <option value="">All statuses</option>
-              <option value="needs_review">Needs review</option>
-              <option value="waiting_input">Waiting for email</option>
-              <option value="starting">Starting</option>
-              <option value="running">Running</option>
-              <option value="completed">Completed</option>
-              <option value="expired">Expired</option>
-              <option value="cancelled">Cancelled</option>
-              <option value="failed">Failed</option>
-            </select>
+      </aside>
+      <div class="workspace-body">
+        <header class="topbar">
+          <span id="section-label">Workspace</span>
+          <a id="connection-summary" href="#accounts"></a>
+        </header>
+        <main id="main" tabindex="-1">
+          <div id="app-notice" class="notice" role="status" hidden></div>
+          <div id="app-error" class="error" role="alert" hidden></div>
+          <section id="sign-in" class="sign-in" hidden>
+            <h1>Open your workspace</h1>
+            <p>Use the access key supplied by your administrator.</p>
+            <form id="sign-in-form" class="sign-in-form">
+              <label for="access-key">Access key</label>
+              <input
+                type="password"
+                id="access-key"
+                name="token"
+                autocomplete="current-password"
+                required
+              />
+              <p id="sign-in-error" class="field-error" role="alert" hidden></p>
+              <button type="submit" class="button primary" id="sign-in-submit">
+                Sign in
+              </button>
+            </form>
+          </section>
+          <div id="content" aria-live="polite">
+            <p class="loading">Opening workspace…</p>
           </div>
-          <details class="lookup">
-            <summary>Find an inbound event</summary>
-            <form id="event-form">
-              <label for="event-id">Event ID</label>
-              <div class="inline">
-                <input
-                  id="event-id"
-                  required
-                  autocomplete="off"
-                  placeholder="Event UUID"
-                /><button type="submit">Look up</button>
+          <section id="editor" hidden aria-labelledby="editor-title">
+            <div class="page-heading editor-heading">
+              <div>
+                <a href="#automations" class="back-link">← Automations</a>
+                <h1 id="editor-title">New automation</h1>
+                <p id="editor-state"></p>
+              </div>
+              <button type="button" id="save-draft" class="button primary">
+                Save draft
+              </button>
+            </div>
+            <form id="automation-form">
+              <div class="editor-layout">
+                <div class="editor-fields">
+                  <section class="form-section" aria-labelledby="basics-title">
+                    <h2 id="basics-title">Automation</h2>
+                    <div class="field">
+                      <label for="automation-name">Name</label
+                      ><input
+                        id="automation-name"
+                        name="name"
+                        maxlength="200"
+                        required
+                        autocomplete="off"
+                      />
+                    </div>
+                    <div class="field">
+                      <label for="account">Instagram account</label
+                      ><select id="account" name="connectionId">
+                        <option value="">Choose an account</option>
+                      </select>
+                      <p id="account-help" class="field-help"></p>
+                    </div>
+                  </section>
+                  <section class="form-section" aria-labelledby="trigger-title">
+                    <h2 id="trigger-title">When a comment contains</h2>
+                    <div class="field">
+                      <label for="keyword">Keyword or phrase</label
+                      ><input
+                        id="keyword"
+                        name="keyword"
+                        maxlength="60"
+                        autocomplete="off"
+                      />
+                      <p class="field-help">
+                        Matches whole words, regardless of case.
+                      </p>
+                    </div>
+                    <p class="scope-line">
+                      Applies to all posts on the selected account.
+                    </p>
+                  </section>
+                  <section
+                    class="form-section"
+                    aria-labelledby="conversation-title"
+                  >
+                    <h2 id="conversation-title">Start the conversation</h2>
+                    <div class="field">
+                      <label for="public-reply">Public comment reply</label
+                      ><textarea
+                        id="public-reply"
+                        name="publicReply"
+                        rows="3"
+                        maxlength="1000"
+                      ></textarea>
+                    </div>
+                    <div class="field">
+                      <label for="email-prompt"
+                        >Private message asking for an email</label
+                      ><textarea
+                        id="email-prompt"
+                        name="emailPrompt"
+                        rows="3"
+                        maxlength="1000"
+                      ></textarea>
+                    </div>
+                    <div class="field-row">
+                      <div class="field">
+                        <label for="timeout">Wait for a reply</label>
+                        <div class="unit-input">
+                          <input
+                            id="timeout"
+                            name="timeoutHours"
+                            type="number"
+                            min="1"
+                            max="720"
+                            step="1"
+                          /><span>hours</span>
+                        </div>
+                      </div>
+                      <div class="field">
+                        <label for="clarifications"
+                          >Clarification attempts</label
+                        ><select id="clarifications" name="maxClarifications">
+                          <option value="0">None</option>
+                          <option value="1">One</option>
+                          <option value="2">Two</option>
+                          <option value="3">Three</option>
+                        </select>
+                      </div>
+                    </div>
+                    <div class="field" id="clarification-field">
+                      <label for="clarification"
+                        >If the reply is not an email</label
+                      ><textarea
+                        id="clarification"
+                        name="clarificationText"
+                        rows="3"
+                        maxlength="1000"
+                      ></textarea>
+                    </div>
+                  </section>
+                  <section class="form-section" aria-labelledby="link-title">
+                    <h2 id="link-title">After an email is received</h2>
+                    <div class="field">
+                      <label for="link-text">Message sent with the link</label
+                      ><textarea
+                        id="link-text"
+                        name="linkText"
+                        rows="3"
+                        maxlength="1000"
+                      ></textarea>
+                    </div>
+                    <div class="field">
+                      <label for="link-url">Link</label
+                      ><input
+                        id="link-url"
+                        name="linkUrl"
+                        type="url"
+                        inputmode="url"
+                        autocomplete="off"
+                      />
+                    </div>
+                  </section>
+                </div>
+                <aside class="publish-panel" aria-labelledby="publish-title">
+                  <h2 id="publish-title">Publish</h2>
+                  <p id="publish-explanation"></p>
+                  <div id="publish-requirements"></div>
+                  <button
+                    type="button"
+                    class="button primary"
+                    id="publish-automation"
+                  >
+                    Publish automation
+                  </button>
+                  <button
+                    type="button"
+                    class="button secondary"
+                    id="toggle-automation"
+                    hidden
+                  >
+                    Pause automation
+                  </button>
+                  <p class="field-help" id="publish-footnote">
+                    Changes apply to new conversations. Existing conversations
+                    keep their saved version.
+                  </p>
+                </aside>
               </div>
             </form>
-            <div id="event-result" aria-live="polite"></div>
-          </details>
-        </div>
-        <div class="workbench">
-          <section class="run-panel" aria-labelledby="runs-title">
-            <div class="panel-heading">
-              <h2 id="runs-title">Recent runs</h2>
-              <span id="run-count"></span>
-            </div>
-            <div id="runs" class="run-list" aria-live="polite"></div>
-            <button id="load-older" type="button" hidden>
-              Load older runs
-            </button>
           </section>
-          <section
-            class="detail-panel"
-            aria-labelledby="detail-title"
-            id="detail"
-          >
-            <div class="empty">
-              <h2 id="detail-title">Choose a conversation</h2>
-              <p>Select a run to inspect its timeline and message outcomes.</p>
-            </div>
-          </section>
-        </div>
+        </main>
       </div>
-    </main>
+    </div>
     <dialog id="resolve-dialog" aria-labelledby="resolve-title">
       <form id="resolve-form">
-        <h2 id="resolve-title">Resolve uncertain message</h2>
-        <p>Check the platform's message history before recording a decision.</p>
+        <h2 id="resolve-title">Check this message</h2>
+        <p>
+          Open the conversation in Instagram and check whether this message was
+          sent.
+        </p>
         <fieldset>
-          <legend>What does the evidence show?</legend>
+          <legend>What did you find?</legend>
           <label class="choice"
-            ><input type="radio" name="resolution" value="accepted" required />
-            The platform accepted this message</label
+            ><input
+              type="radio"
+              name="resolution"
+              value="accepted"
+              required
+            />The message is in the conversation</label
           ><label class="choice"
-            ><input type="radio" name="resolution" value="not_sent" required />
-            The message was never sent</label
+            ><input
+              type="radio"
+              name="resolution"
+              value="not_sent"
+              required
+            />The message was never sent</label
           >
         </fieldset>
-        <p class="help">
-          Confirming it was never sent allows an active run to attempt sending
-          again.
-        </p>
-        <label for="resolution-note">Evidence and reason</label
-        ><textarea
-          id="resolution-note"
-          required
-          maxlength="500"
-          rows="3"
-        ></textarea>
-        <p id="resolve-error" class="error" role="alert" hidden></p>
+        <div class="field">
+          <label for="resolution-note">What you checked</label
+          ><textarea
+            id="resolution-note"
+            rows="3"
+            maxlength="500"
+            required
+          ></textarea>
+          <p class="field-help">
+            Confirming that it was never sent allows another attempt.
+          </p>
+        </div>
+        <p id="resolve-error" class="field-error" role="alert" hidden></p>
         <div class="dialog-actions">
-          <button type="button" id="close-resolve">Keep unresolved</button
-          ><button class="primary" id="save-resolution" type="submit">
-            Record decision
+          <button type="button" id="close-resolve" class="button secondary">
+            Keep unresolved</button
+          ><button type="submit" id="save-resolution" class="button primary">
+            Save decision
           </button>
         </div>
       </form>

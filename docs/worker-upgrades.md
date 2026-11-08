@@ -46,6 +46,6 @@ npm test -- tests/unit/worker-deployment.test.ts tests/integration/worker-versio
 
 The integration test starts its own temporary Temporal server, creates an isolated task queue and deployment name, and starts two versioned workers. It runs a workflow under v1, promotes v2, and starts another workflow. Both workflows then execute another activity. The old workflow returns `["v1", "v1"]`, the new workflow returns `["v2", "v2"]`, and the server's description of the old workflow records pinned behavior and build v1. Workflow caching is disabled during this check, so later tasks exercise server routing.
 
-The check passed on the bundled Temporal CLI 1.10.0 with Server 1.32.2 in approximately four seconds. It contacts the temporary server and leaves the running demonstration stack untouched. It uses no application database.
+The check passed on the bundled Temporal CLI 1.10.0 with Server 1.32.2 in approximately four seconds. It contacts the temporary server and leaves the operational workspace stack untouched. It uses no application database.
 
 Worker Deployment API support was verified on that server version. The repository's older Docker server image requires its own compatibility check before enabling these variables. A server that lacks the deployment APIs requires an upgrade or continued replay-safe unversioned operation. Versioning is opt-in and the configuration defaults leave it disabled.

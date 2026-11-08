@@ -1,6 +1,7 @@
+import { createTestAccess } from '../helpers/test-access';
 import { expect, it } from 'vitest';
 import { createTracing } from '../../src/observability/tracing';
-import { sendJson, startServer } from '../../src/fakes/http';
+import { sendJson, startServer } from '../fixtures/providers/http';
 import { buildServer } from '../../src/api/server';
 import { systemClock } from '../../src/domain/clock';
 import { createTestDb } from '../helpers/db';
@@ -73,14 +74,15 @@ it('exports one HTTP trace containing real webhook ingestion and routing spans',
   const exports: any[] = [];
   const collector = await startServer((_req, res, body) => { exports.push(body); sendJson(res, 200, {}); });
   const tracing = createTracing({ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `${collector.url}/v1/traces` });
-  const app = buildServer({ db: database.db, clock: systemClock, logger: false, tracing });
+  const auth = createTestAccess();
+  const app = buildServer({ db: database.db, access: auth.access, dispatchConfigured: true, integrationMode: 'gateway', clock: systemClock, logger: false, tracing });
   try {
     const tenant = await seedTenant(database.db);
     await createAutomation(database.db, tenant);
     const url = await app.listen({ host: '127.0.0.1', port: 0 });
+    const raw = JSON.stringify(commentEvent({ accountId: tenant.accountId, from: 'private-person', text: 'pricing private-email@example.com' }));
     const response = await fetch(`${url}/webhooks/instagram`, {
-      method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer private-token' },
-      body: JSON.stringify(commentEvent({ accountId: tenant.accountId, from: 'private-person', text: 'pricing private-email@example.com' })),
+      method: 'POST', headers: { ...auth.webhookHeaders(raw), authorization: 'Bearer private-token' }, body: raw,
     });
     expect(response.status).toBe(202);
     await response.json();

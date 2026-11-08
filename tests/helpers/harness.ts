@@ -1,3 +1,4 @@
+import { createTestAccess } from './test-access';
 import { randomUUID } from 'node:crypto';
 import { inject } from 'vitest';
 import { Client, Connection } from '@temporalio/client';
@@ -6,9 +7,9 @@ import type { Pool } from 'pg';
 import { createTestDb } from './db';
 import { commentEvent, createAutomation, dmEvent, seedTenant } from './fixtures';
 import { pricingWith } from './definitions';
-import { startFakeInstagram, type FakeInstagram } from '../../src/fakes/fake-instagram';
-import { startFakeCrm, type FakeCrm } from '../../src/fakes/fake-crm';
-import { startFakeAlertSink, type FakeAlertSink } from '../../src/fakes/fake-alert-sink';
+import { startFakeInstagram, type FakeInstagram } from '../fixtures/providers/fake-instagram';
+import { startFakeCrm, type FakeCrm } from '../fixtures/providers/fake-crm';
+import { startFakeAlertSink, type FakeAlertSink } from '../fixtures/providers/fake-alert-sink';
 import { HttpInstagramAdapter } from '../../src/adapters/instagram';
 import { HttpCrmClient } from '../../src/adapters/crm';
 import { HttpAlertSink } from '../../src/adapters/alerts';
@@ -59,6 +60,7 @@ export async function createHarness(o: HarnessOptions = {}) {
   };
   const deps: ActivityDeps = {
     db,
+    integrationMode: 'gateway',
     clock: systemClock,
     platform: new HttpInstagramAdapter(ig.url, { timeoutMs: o.sendTimeoutMs ?? 1_000 }),
     hooks,
@@ -81,7 +83,8 @@ export async function createHarness(o: HarnessOptions = {}) {
   const tenant = await seedTenant(db, { capabilities: o.capabilities });
   const automation = await createAutomation(db, tenant, o.definition ?? pricingWith({ timeout: '30s' }));
   const routerDeps = { db, clock: systemClock, onOutbox: poke };
-  const api = buildServer({ db, clock: systemClock, onOutbox: poke, logger: false });
+  const auth = createTestAccess();
+  const api = buildServer({ db, access: auth.access, provisioningSecret: auth.provisioningSecret, dispatchConfigured: true, integrationMode: 'gateway', clock: systemClock, onOutbox: poke, logger: false });
 
   async function deliver(raw: unknown) {
     const res = await ingestEvent(routerDeps, raw);
@@ -94,8 +97,17 @@ export async function createHarness(o: HarnessOptions = {}) {
 
     /** Calls the management API as this tenant. */
     request: async (method: 'GET' | 'POST', url: string, payload?: unknown) => {
-      const res = await api.inject({ method, url, payload: payload as any, headers: { 'x-tenant-id': tenant.tenantId } });
+      const res = await api.inject({ method, url, payload: payload as any, headers: auth.operatorHeaders(tenant.tenantId) });
       return { status: res.statusCode, body: res.body ? res.json() : undefined };
+    },
+    async provisionAccount(status: 'active' | 'unauthorized' | 'disconnected') {
+      const account = (await db.query('SELECT capabilities, integration_revision FROM social_connections WHERE id = $1', [tenant.connectionId])).rows[0];
+      const res = await api.inject({ method: 'POST', url: '/integrations/accounts', ...auth.signedIntegration({
+        type: 'instagram.account.updated', eventId: randomUUID(), tenantId: tenant.tenantId,
+        accountId: tenant.accountId, displayName: 'Test account', status, capabilities: account.capabilities,
+        integrationRevision: Number(account.integration_revision) + 1, occurredAt: new Date().toISOString(),
+      }) });
+      return { status: res.statusCode, body: res.json() };
     },
     /** Messages the fake Instagram accepted that belong to this participant's conversation. */
     messagesFor: (participant: string, commentId?: string) =>

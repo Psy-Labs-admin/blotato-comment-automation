@@ -1,9 +1,7 @@
 # Human and AI contributions
 
-The requester supplied the interview prompt, reviewed the proposed scope, requested a working implementation and asked for a deep review. They chose a local deployment for the interview and a private GitHub repository. This record attributes only decisions visible in the project history.
+The requester supplied the interview prompt, reviewed the proposed scope and asked for a working implementation. They set the design reference, requested the removal of seeded data and asked for direct Instagram integration. They chose to publish this repository for review.
 
-AI produced the initial system design, TypeScript implementation, SQL schema, tests, demo and technical documentation. The starting implementation for the review was commit `d0522dc`. The original session's implementation notes remain in Git history.
+AI developed the system design, TypeScript application, PostgreSQL schema, operator console, test suite and documentation. Codex performed the follow-up code and design reviews, implemented corrections and ran the verification. The requester did not claim to have hand-written the implementation.
 
-During the follow-up review, Codex compared the implementation with the prompt and the extended plan. Separate agents examined workflow execution, storage and the operator interface. An independent reviewer challenged the release assumptions and concurrency guarantees. Codex implemented the fixes, added regression tests, ran the system locally and prepared the GitHub release. The workflow replay fixture was recorded from the previous revision using synthetic data.
-
-No hand-written implementation or personal test execution is attributed to the candidate in this record.
+The tests distinguish behavior exercised on PostgreSQL, Temporal and HTTP transports from behavior that needs an authorized external account. No live Meta account has been used in the reported verification.

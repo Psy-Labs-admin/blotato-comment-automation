@@ -1,5 +1,7 @@
-import { mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { InstagramGraphPlatform } from './instagram/platform';
+import { getInstagramCredentials, refreshDueInstagramAccounts } from './instagram/accounts';
+import type { SocialPlatform } from './adapters/instagram';
+import type { MetadataClient } from './metadata/client';
 import { Client, Connection } from '@temporalio/client';
 import { NativeConnection } from '@temporalio/worker';
 import { HttpAlertSink, TelegramNotifier, type AlertNotifier } from './adapters/alerts';
@@ -9,10 +11,6 @@ import { loadAccess } from './api/access';
 import { buildServer } from './api/server';
 import { loadConfig } from './config';
 import { systemClock } from './domain/clock';
-import { startFakeAlertSink } from './fakes/fake-alert-sink';
-import { startFakeCrm } from './fakes/fake-crm';
-import { startFakeInstagram } from './fakes/fake-instagram';
-import { DemoReceipts } from './fakes/receipts';
 import { metadataHandler } from './metadata/hydrate';
 import { HttpMetadataClient } from './metadata/client';
 import { redactExpiredInbox } from './storage/retention';
@@ -28,52 +26,34 @@ import { temporalHandlers } from './temporal/handlers';
 import { startWorker, workerDeploymentOptionsFromEnv, type RunningWorker } from './temporal/worker';
 
 /**
- * One codebase, three roles. ROLE=all runs everything in one process (demo); in production API,
+ * One codebase, three roles. ROLE=all runs all configured processes together. API,
  * worker and relay run as separate deployments and scale independently.
  */
 async function main() {
   const cfg = loadConfig();
-  const localDemo = cfg.fakes && process.env.NODE_ENV !== 'production';
-  if (cfg.fakes && !localDemo) throw new Error('In-process fakes require development mode');
-  if (!localDemo && cfg.temporalAddress === 'embedded') throw new Error('Embedded Temporal requires local demo mode');
   const servesHttp = cfg.role === 'api' || cfg.role === 'all';
-  const access = servesHttp && !localDemo ? loadAccess(process.env) : undefined;
+  const access = servesHttp ? loadAccess(process.env) : undefined;
   const db = createPool(cfg.databaseUrl);
   await migrate(db);
   const tracing = createTracing(process.env);
   const stops: Array<() => Promise<void>> = [() => tracing.shutdown()];
 
-  if (cfg.fakes) {
-    mkdirSync('.local', { recursive: true, mode: 0o700 });
-    const receipts = new DemoReceipts('.local/simulator.sqlite');
-    stops.push(async () => receipts.close());
-    const [ig, crm, sink] = await Promise.all([startFakeInstagram(4001, receipts), startFakeCrm(4002, receipts), startFakeAlertSink(4003, true)]);
-    stops.push(ig.close, crm.close, sink.close);
-    console.log('fakes: instagram :4001, crm :4002, alert sink :4003');
-  }
-
-  let temporalAddress = cfg.temporalAddress;
-  if (temporalAddress === 'embedded') {
-    // Dev convenience without Docker: the official Temporal dev server (downloads the CLI once).
-    const { TestWorkflowEnvironment } = await import('@temporalio/testing');
-    const dbFilename = resolve(process.env.TEMPORAL_DEV_DB ?? '.local/temporal.sqlite');
-    mkdirSync(dirname(dbFilename), { recursive: true, mode: 0o700 });
-    const env = await TestWorkflowEnvironment.createLocal({
-      server: { ip: '127.0.0.1', port: 7233, ui: true, uiPort: 8233, dbFilename },
-    });
-    temporalAddress = env.address;
-    stops.push(() => env.teardown());
-    console.log(`embedded Temporal dev server at ${temporalAddress} (UI http://localhost:8233)`);
-  }
-
   const relays: OutboxRelay[] = [];
   const poke = () => relays.forEach((r) => r.poke());
   const role = cfg.role;
+  const nativePlatform = cfg.nativeInstagram ? new InstagramGraphPlatform({
+    graphVersion: cfg.nativeInstagram.graphVersion,
+    credentials: (accountId) => getInstagramCredentials({ db, encryptionKey: cfg.nativeInstagram!.encryptionKey, clock: systemClock }, accountId),
+  }) : undefined;
+  const platform: SocialPlatform | undefined = nativePlatform ?? (cfg.instagram
+    ? new HttpInstagramAdapter(cfg.instagram.baseUrl, { timeoutMs: 10_000, token: cfg.instagram.token }) : undefined);
+  const metadata: MetadataClient | undefined = nativePlatform ?? (cfg.instagram
+    ? new HttpMetadataClient(cfg.instagram.baseUrl, 5_000, cfg.instagram.token) : undefined);
 
   if (role === 'all' || role === 'worker') {
-    const native = await NativeConnection.connect({ address: temporalAddress });
+    const native = await NativeConnection.connect({ address: cfg.temporalAddress });
     const worker: RunningWorker = await startWorker({
-      deps: { db, tracing, clock: systemClock, platform: new HttpInstagramAdapter(cfg.instagramBaseUrl, { timeoutMs: 10_000 }), onOutbox: poke },
+      deps: { db, integrationMode: cfg.nativeInstagram ? 'native' : cfg.instagram ? 'gateway' : 'unconfigured', tracing, clock: systemClock, platform: platform!, onOutbox: poke },
       deploymentOptions: workerDeploymentOptionsFromEnv(),
       connection: native,
       namespace: cfg.temporalNamespace,
@@ -87,28 +67,39 @@ async function main() {
   }
 
   if (role === 'all' || role === 'relay') {
-    const connection = await Connection.connect({ address: temporalAddress });
+    const connection = await Connection.connect({ address: cfg.temporalAddress });
     const client = new Client({ connection, namespace: cfg.temporalNamespace });
-    const notifier: AlertNotifier =
-      cfg.telegramBotToken && cfg.telegramChatId ? new TelegramNotifier(cfg.telegramBotToken, cfg.telegramChatId) : new HttpAlertSink(cfg.alertSinkUrl);
+    const notifier: AlertNotifier | undefined = cfg.telegramBotToken && cfg.telegramChatId
+      ? new TelegramNotifier(cfg.telegramBotToken, cfg.telegramChatId)
+      : cfg.alertSink ? new HttpAlertSink(cfg.alertSink.baseUrl, { token: cfg.alertSink.token }) : undefined;
+    const crm = cfg.crm ? new HttpCrmClient(cfg.crm.baseUrl, { token: cfg.crm.token }) : undefined;
     const onError = (err: unknown) => console.error('relay error', err);
-    // Separate relays so a slow CRM never delays workflow starts/signals.
-    relays.push(
-      // Temporal commands are never dead-lettered: a Temporal outage only delays them
-      // (visible as outbox_oldest_pending_seconds), it must not strand runs.
-      new OutboxRelay({
-        db, tracing, kinds: ['workflow.start', 'workflow.signal'], handlers: temporalHandlers({ client, db, taskQueue: cfg.taskQueue }),
-        maxAttempts: Number.POSITIVE_INFINITY, onDead: onDeadLetter, onError,
-      }),
-      new OutboxRelay({
-        db, tracing, kinds: ['crm.lead_captured', 'alert.notify'], onDead: onDeadLetter, onError,
-        handlers: integrationHandlers({ db, crm: new HttpCrmClient(cfg.crmBaseUrl), notifier, consoleUrl: cfg.consoleUrl }),
-      }),
-    );
+    const integrations = integrationHandlers({ db, crm, notifier, consoleUrl: cfg.consoleUrl });
+    // Each configured service advances independently. Unconfigured destinations retain pending outbox rows.
     relays.push(new OutboxRelay({
-      db, tracing, kinds: ['metadata.hydrate'], onDead: onDeadLetter, onError,
-      handlers: { 'metadata.hydrate': metadataHandler({ db, client: new HttpMetadataClient(cfg.instagramBaseUrl) }) },
+      db, tracing, kinds: ['workflow.start', 'workflow.signal'],
+      handlers: temporalHandlers({ client, db, taskQueue: cfg.taskQueue }),
+      maxAttempts: Number.POSITIVE_INFINITY, onDead: onDeadLetter, onError,
     }));
+    if (crm) relays.push(new OutboxRelay({
+      db, tracing, kinds: ['crm.lead_captured'], handlers: integrations, onDead: onDeadLetter, onError,
+    }));
+    if (notifier) relays.push(new OutboxRelay({
+      db, tracing, kinds: ['alert.notify'], handlers: integrations, onDead: onDeadLetter, onError,
+    }));
+    if (metadata) relays.push(new OutboxRelay({
+      db, tracing, kinds: ['metadata.hydrate'], onDead: onDeadLetter, onError,
+      handlers: { 'metadata.hydrate': metadataHandler({ db, client: metadata }) },
+    }));
+    if (cfg.nativeInstagram) {
+      let refreshing: Promise<void> | undefined;
+      const refresh = setInterval(() => {
+        if (refreshing) return;
+        refreshing = refreshDueInstagramAccounts({ db, config: cfg.nativeInstagram!, clock: systemClock })
+          .then(() => undefined).catch(onError).finally(() => { refreshing = undefined; });
+      }, 60_000);
+      stops.push(async () => { clearInterval(refresh); await refreshing; });
+    }
     if (cfg.inboxRetentionEnabled) {
       const timer = setInterval(() => redactExpiredInbox(db, {
         enabled: true, olderThanDays: cfg.inboxRetentionDays,
@@ -129,12 +120,19 @@ async function main() {
       await Promise.all(relays.map((r) => r.stop()));
       await connection.close();
     });
-    console.log(`relay running (alerts -> ${notifier instanceof TelegramNotifier ? 'Telegram' : cfg.alertSinkUrl})`);
+    console.log('configured relays are running');
   }
 
   if (role === 'all' || role === 'api') {
-    const app = buildServer({ db, access, tracing, demo: localDemo, clock: systemClock, onOutbox: poke, metrics: createMetrics(db) });
-    await app.listen({ port: cfg.port, host: localDemo ? '127.0.0.1' : (process.env.HOST ?? '127.0.0.1') });
+    const app = buildServer({ db, access: access!,
+      dispatchConfigured: cfg.dispatchEnabled,
+      integrationMode: cfg.nativeInstagram ? 'native' : cfg.instagram ? 'gateway' : 'unconfigured',
+      nativeInstagram: cfg.nativeInstagram,
+      provisioningSecret: cfg.provisioningSecret,
+      integrationSettingsUrl: cfg.integrationSettingsUrl,
+      consoleOrigin: cfg.consoleUrl ? new URL(cfg.consoleUrl).origin : undefined,
+      tracing, clock: systemClock, onOutbox: poke, metrics: createMetrics(db) });
+    await app.listen({ port: cfg.port, host: cfg.host });
     stops.push(() => app.close());
   }
 

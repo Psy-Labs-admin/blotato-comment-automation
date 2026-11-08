@@ -45,7 +45,7 @@ function deliveries(accountId: string, count: number, type: Delivery['type']): D
   return result;
 }
 
-async function deliverAtRate(url: string, events: Delivery[], rate: number) {
+async function deliverAtRate(url: string, events: Delivery[], rate: number, sign: (raw: string) => Record<string, string>) {
   const httpMs: number[] = [];
   const scheduledMs: number[] = [];
   const scheduleLagMs: number[] = [];
@@ -64,7 +64,8 @@ async function deliverAtRate(url: string, events: Delivery[], rate: number) {
     scheduleLagMs.push(dispatched - scheduled);
     pending.push((async () => {
       try {
-        const response = await fetch(`${url}/webhooks/instagram`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(event), signal: AbortSignal.timeout(30_000), redirect: 'error' });
+        const raw = JSON.stringify(event);
+        const response = await fetch(`${url}/webhooks/instagram`, { method: 'POST', headers: sign(raw), body: raw, signal: AbortSignal.timeout(30_000), redirect: 'error' });
         const body = await response.json() as { duplicate?: boolean; eventId?: string };
         const finished = performance.now();
         httpMs.push(finished - dispatched);
@@ -102,9 +103,9 @@ export async function runLoadCheck(env: NodeJS.ProcessEnv = process.env) {
   const unique = count - Math.floor(count / 5);
   const stack = await createLoadStack(count);
   try {
-    const comments = await deliverAtRate(stack.url, deliveries(stack.accountId, count, 'comment.created'), rate);
+    const comments = await deliverAtRate(stack.url, deliveries(stack.accountId, count, 'comment.created'), rate, stack.auth.webhookHeaders);
     const promptsReady = await waitUntil(async () => Number((await stack.db.query(`SELECT count(*) AS n FROM input_waits WHERE status = 'active'`)).rows[0].n) === unique, timeoutMs);
-    const messages = await deliverAtRate(stack.url, deliveries(stack.accountId, count, 'message.received'), rate);
+    const messages = await deliverAtRate(stack.url, deliveries(stack.accountId, count, 'message.received'), rate, stack.auth.webhookHeaders);
     const drained = await waitUntil(async () => {
       const progress = (await stack.db.query(`SELECT (SELECT count(*)::int FROM automation_runs WHERE status = 'completed') AS completed, (SELECT count(*)::int FROM outbox WHERE status <> 'done') AS pending`)).rows[0];
       return progress.completed === unique && progress.pending === 0 && stack.crm.records().length === unique;

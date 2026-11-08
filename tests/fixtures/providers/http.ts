@@ -1,4 +1,4 @@
-import { localRequest } from '../api/loopback';
+import { localRequest } from '../../../src/api/loopback';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 

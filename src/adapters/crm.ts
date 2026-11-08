@@ -14,16 +14,16 @@ export interface CrmClient {
 export class HttpCrmClient implements CrmClient {
   constructor(
     private readonly baseUrl: string,
-    private readonly opts: { timeoutMs: number } = { timeoutMs: 5_000 },
+    private readonly opts: { timeoutMs?: number; token?: string } = { timeoutMs: 5_000 },
   ) {}
 
   async upsertLead(e: LeadCapturedEvent, idempotencyKey: string): Promise<void> {
     const res = await fetch(`${this.baseUrl}/leads`, {
       method: 'POST',
       redirect: 'error',
-      headers: { 'content-type': 'application/json', 'idempotency-key': idempotencyKey },
+      headers: { 'content-type': 'application/json', 'idempotency-key': idempotencyKey, ...(this.opts.token ? { authorization: 'Bearer ' + this.opts.token } : {}) },
       body: JSON.stringify(e),
-      signal: AbortSignal.timeout(this.opts.timeoutMs),
+      signal: AbortSignal.timeout(this.opts.timeoutMs ?? 5_000),
     });
     if (!res.ok) throw new Error(`CRM upsert failed: HTTP ${res.status}`);
   }

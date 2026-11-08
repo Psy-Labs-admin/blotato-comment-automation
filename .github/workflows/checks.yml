@@ -33,4 +33,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run build
       - run: npm test
+      - name: Build deployable image
+        run: docker build --tag blotato-workspace:checks .
+      - name: Verify runtime assets
+        run: docker run --rm blotato-workspace:checks node -e "require('./dist/api/server'); require('node:fs').accessSync('dist/ui/index.html')"

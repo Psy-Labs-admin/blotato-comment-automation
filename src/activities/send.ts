@@ -142,9 +142,14 @@ async function reserve(c: PoolClient, deps: ActivityDeps, i: { runId: string; st
   // A pause and a new reservation must have a definite order. Hold the account lock
   // until the reservation commits. Account budgets are shared. The lock ends before any provider I/O.
   const account = (await c.query(
-    'SELECT external_account_id, capabilities, status, sends_paused FROM social_connections WHERE id = $1 FOR NO KEY UPDATE',
+    'SELECT external_account_id, capabilities, status, sends_paused, verified_at, integration_kind FROM social_connections WHERE id = $1 FOR NO KEY UPDATE',
     [ctx.connection_id],
   )).rows[0];
+  const credential = (await c.query('SELECT token_version FROM instagram_credentials WHERE connection_id = $1', [ctx.connection_id])).rows[0];
+  const mode = deps.integrationMode ?? 'unconfigured';
+  if (mode === 'unconfigured' || (mode === 'native' && (!credential || account.integration_kind !== 'native')) || (mode === 'gateway' && (credential || account.integration_kind === 'native'))) {
+    return block('blocked', 'delivery_unconfigured');
+  }
   const now = deps.clock.now();
   // A question or clarification after its wait's deadline is pointless (and confusing): never send it.
   const waitDeadline = (
@@ -161,7 +166,7 @@ async function reserve(c: PoolClient, deps: ActivityDeps, i: { runId: string; st
     conversationId: conv.id,
     kind: intent.kind,
     capabilities: parseCapabilities(account.capabilities),
-    connectionStatus: account.status,
+    connectionStatus: account.verified_at ? account.status : 'disconnected',
     sendsPaused: account.sends_paused,
     conversation: conv,
     triggerCommentAt: new Date(ctx.comment_at),
@@ -276,24 +281,36 @@ async function record(c: PoolClient, deps: ActivityDeps, reserved: IntentRow, at
       await c.query(`UPDATE message_intents SET status = 'rejected', status_reason = $2, updated_at = now() WHERE id = $1`, [intent.id, reason]);
       await audit(c, { ...base, type: 'send.rejected', reason, data: { providerCode: out.code, httpStatus: out.httpStatus } });
       if (unauthorized) {
-        // Stop every automation on this account until it is reconnected (in-flight runs defer).
-        await c.query(
-          `UPDATE social_connections SET status = 'unauthorized', sends_paused = true, sends_paused_reason = $2 WHERE id = $1`,
-          [intent.connection_id, Reason.PROVIDER_UNAUTHORIZED],
-        );
-        await raiseIncident(c, { tenantId: intent.tenant_id, connectionId: intent.connection_id, errorClass: 'connection_unauthorized', runId: intent.run_id });
+        // Reconnect and refresh take this account lock before replacing the credential. Read the
+        // generation after the lock, so an old HTTP response cannot revoke the new token.
+        await c.query('SELECT id FROM social_connections WHERE id = $1 FOR NO KEY UPDATE', [intent.connection_id]);
+        const credential = (await c.query('SELECT token_version FROM instagram_credentials WHERE connection_id = $1', [intent.connection_id])).rows[0];
+        const generation = out.credentialGeneration;
+        const current = deps.integrationMode === 'native'
+          ? generation?.connectionId === intent.connection_id && credential?.token_version === generation?.version
+          : deps.integrationMode === 'gateway' && !credential;
+        if (current) {
+          await c.query(
+            `UPDATE social_connections SET status = 'unauthorized', sends_paused = true, sends_paused_reason = $2 WHERE id = $1`,
+            [intent.connection_id, Reason.PROVIDER_UNAUTHORIZED],
+          );
+          await raiseIncident(c, { tenantId: intent.tenant_id, connectionId: intent.connection_id, errorClass: 'connection_unauthorized', runId: intent.run_id });
+        }
       }
       return { status: 'rejected', intentId: intent.id, reason };
     }
 
-    case 'not_sent':
+    case 'not_sent': {
       // Provably no effect: the same intent may be attempted again later.
+      const reason = out.code === 'throttled' ? Reason.PROVIDER_THROTTLED
+        : out.code === 'credentials_unavailable' ? Reason.CREDENTIALS_UNAVAILABLE : Reason.PROVIDER_UNAVAILABLE;
       await c.query(
         `UPDATE message_intents SET status = 'pending', status_reason = $2, current_attempt_id = NULL, next_attempt_at = $3, updated_at = now() WHERE id = $1`,
-        [intent.id, Reason.PROVIDER_THROTTLED, new Date(now.getTime() + out.retryAfterMs)],
+        [intent.id, reason, new Date(now.getTime() + out.retryAfterMs)],
       );
-      await audit(c, { ...base, type: 'send.deferred', reason: Reason.PROVIDER_THROTTLED, data: { providerCode: out.code, retryAfterMs: out.retryAfterMs } });
-      return { status: 'deferred', intentId: intent.id, retryAfterMs: out.retryAfterMs, reason: Reason.PROVIDER_THROTTLED };
+      await audit(c, { ...base, type: 'send.deferred', reason, data: { providerCode: out.code, retryAfterMs: out.retryAfterMs } });
+      return { status: 'deferred', intentId: intent.id, retryAfterMs: out.retryAfterMs, reason };
+    }
 
     case 'unknown': {
       await c.query(`UPDATE message_intents SET status = 'unknown', status_reason = $2, updated_at = now() WHERE id = $1`, [
@@ -326,6 +343,7 @@ export async function reconcileIntent(deps: ActivityDeps, i: { intentId: string 
   if (row.status === 'pending') return { status: 'retry_allowed' };
   if (row.status !== 'unknown') return { status: 'unresolved' };
 
+  if (deps.integrationMode !== 'gateway' || (await deps.db.query('SELECT 1 FROM instagram_credentials WHERE connection_id = $1', [row.connection_id])).rowCount) return { status: 'unresolved' };
   const reconciliation = parseCapabilities(row.capabilities).reconciliation ?? 'none';
   if (reconciliation !== 'lookup_by_client_ref' || !deps.platform.lookupByClientRef) return { status: 'unresolved' };
   let found: Awaited<ReturnType<NonNullable<typeof deps.platform.lookupByClientRef>>>;
@@ -339,6 +357,7 @@ export async function reconcileIntent(deps: ActivityDeps, i: { intentId: string 
 
   return withTx(deps.db, async (c) => {
     await c.query(`SELECT 1 FROM conversations WHERE id = $1 FOR UPDATE`, [row.conversation_id]);
+    if ((await c.query('SELECT 1 FROM instagram_credentials WHERE connection_id = $1', [row.connection_id])).rowCount) return { status: 'unresolved' };
     const r = await c.query(
       `UPDATE message_intents SET status = 'accepted', status_reason = NULL, provider_message_id = $2, resolved_by = 'reconciliation', updated_at = now()
         WHERE id = $1 AND status IN ('unknown', 'pending')`,

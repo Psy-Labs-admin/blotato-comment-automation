@@ -31,7 +31,8 @@ export async function migrate(db: Pool): Promise<string[]> {
 }
 
 if (require.main === module) {
-  const url = process.env.DATABASE_URL ?? 'postgres://postgres:postgres@localhost:55432/blotato';
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error('DATABASE_URL is required');
   const db = createPool(url, 1);
   migrate(db)
     .then((applied) => console.log(applied.length ? `applied: ${applied.join(', ')}` : 'up to date'))

@@ -113,9 +113,9 @@ async function routeComment(c: PoolClient, ev: any, conv: any, now: Date): Promi
     });
   }
 
-  const conn = (await c.query(`SELECT status, sends_paused FROM social_connections WHERE id = $1`, [ev.connection_id])).rows[0];
+  const conn = (await c.query(`SELECT status, sends_paused, verified_at FROM social_connections WHERE id = $1`, [ev.connection_id])).rows[0];
   const suppression =
-    conn.status !== 'active' ? Reason.CONNECTION_INACTIVE
+    (!conn.verified_at || conn.status !== 'active') ? Reason.CONNECTION_INACTIVE
     : conn.sends_paused ? Reason.SENDS_PAUSED
     : conv.opted_out ? Reason.OPTED_OUT
     : conv.human_takeover ? Reason.HUMAN_TAKEOVER

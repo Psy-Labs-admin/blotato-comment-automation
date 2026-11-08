@@ -8,20 +8,18 @@
 | Worker | `ROLE=worker npm start` | active activities (not waiting runs) | yes |
 | Relay + sweeper | `ROLE=relay npm start` | outbox throughput | yes (rows are leased) |
 
-All roles run migrations on start (serialised by an advisory lock). Configuration: `.env.example`.
+All roles apply migrations under an advisory lock. Set the deployment environment before startup. See `.env.example`.
 
 ## API access
 
-The demo binds to `127.0.0.1` and accepts only loopback Host and same-origin browser requests. `FAKES=1` routes Instagram, CRM and alerts to local simulators even if external settings exist. Development credentials select synthetic tenant data. The API disables this mode when `NODE_ENV=production`.
-
-For a non-demo API set the following secrets through your deployment environment. Use TLS at the trusted ingress and restrict database, Temporal and adapter endpoints to the private service network.
+The API requires tenant-bound authentication. Browsers exchange an operator token or one-use sign-in ticket for an eight-hour HttpOnly, SameSite=Strict session. Browser writes require the session's CSRF header. Cookie sessions on a public host require an HTTPS `CONSOLE_ORIGIN` matching the external console host. Backend clients use bearer authentication. Deploy PostgreSQL, Temporal and authenticated integration services on trusted networks.
 
 - `TENANT_TOKEN_HASHES` is a JSON object mapping tenant UUIDs to SHA-256 hex digests of distinct, high-entropy operator tokens. Present the original token in `Authorization: Bearer <token>`. Tenant operators can read leads and resolve uncertain sends for their own workspace.
 - `METRICS_TOKEN_HASH` is the digest of a separate token for `GET /metrics`.
 - `WEBHOOK_SIGNING_SECRET` is a separate shared signing key of at least 32 bytes. The existing Instagram integration verifies Meta's callbacks and signs its normalized JSON for this service. Send Unix seconds in `x-webhook-timestamp` and `sha256=<lowercase hex>` in `x-webhook-signature`. Compute HMAC-SHA256 over timestamp, literal dot and the exact UTF-8 request bytes. Retries outside five minutes need a fresh signature. The original provider event ID still deduplicates the delivery.
 - `HOST` defaults to loopback. The read-only public console shell carries no customer data. Operator credentials are held in page memory.
 
-Set `CONSOLE_ORIGIN` to the public HTTPS origin to include an authenticated run-inspection link in operational alerts. The local demo uses its loopback console automatically.
+Set `CONSOLE_ORIGIN` to the public HTTPS origin to include an authenticated run-inspection link in operational alerts. The console can run on loopback without a public origin.
 
 ## Signals to watch
 
@@ -40,7 +38,7 @@ Set `CONSOLE_ORIGIN` to the public HTTPS origin to include an authenticated run-
 Each Telegram/sink alert names the class, account, number of affected conversations and the action.
 
 ### `send_outcome_unknown`: Instagram may or may not have received a message
-1. `GET /runs?status=blocked_unknown` (operator bearer token, or tenant header in the local demo) and open each run's `GET /runs/:id/timeline`.
+1. `GET /runs?needsReview=true` (operator authentication) and open each run's `GET /runs/:id/timeline`.
 2. Check the conversation in the Instagram inbox (or the provider's logs, if available).
 3. `POST /intents/:id/resolve` with `{"resolution":"accepted","note":"…"}` if the message is there, or
    `{"resolution":"not_sent","note":"…"}` to authorise **one** deliberate new attempt.
@@ -50,7 +48,7 @@ Never bulk-resolve as `not_sent`. That is how people get duplicate DMs.
 
 ### `connection_unauthorized`: token revoked or expired
 Sends for the account are paused and new triggers are suppressed (`connection_inactive`).
-Conversations in progress wait at the gate instead of failing. After the customer reconnects, call
+Conversations in progress wait at the gate instead of failing. After the provider confirms a fresh connection, an outstanding manual pause can be cleared with
 `POST /connections/:id/resume`: waiting conversations continue within about a minute. Sends that
 waited longer than 24 h have already failed visibly, and they are not restarted automatically,
 because a stale conversation should not suddenly resume.
@@ -101,6 +99,6 @@ The metadata relay reads the existing integration's normalized post endpoint aft
 Set `INBOX_RETENTION_ENABLED=1` and `INBOX_RETENTION_DAYS` to opt in to redaction. Every minute the relay redacts up to 100 routed inbox bodies older than the cutoff and records the redaction time. It skips conversations with an owner, an unfinished run, an open wait or an uncertain send. Event identity, ordering and audit records survive, so a repeated delivery still deduplicates. Lead retention is a separate customer policy.
 
 
-Inbox bodies, leads, metadata, database backups and simulator receipts can contain customer content. Use encrypted storage and control access to backups. The local interview demonstration uses synthetic conversations.
+Inbox bodies, leads, metadata and backups can contain customer content. Use encrypted storage and restrict backup access. Keep provider secret keys outside version control.
 
 See [tracing and the load check](observability.md) and [pinned worker upgrades](worker-upgrades.md) for reproduction steps.
