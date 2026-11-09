@@ -56,18 +56,24 @@ function occurredAt(raw: string | number, fallback: number): string {
   return new Date(milliseconds).toISOString();
 }
 
+/** Shared verification route for the application and the isolated webhook listener. */
+export function registerInstagramWebhookVerification(app: FastifyInstance, verifyToken: string): void {
+  app.get('/integrations/instagram/webhook', { exposeHeadRoute: false }, async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const query = req.query as Record<string, unknown>;
+    if (query['hub.mode'] !== 'subscribe' || !matchesSecret(query['hub.verify_token'], verifyToken) ||
+      typeof query['hub.challenge'] !== 'string' || query['hub.challenge'].length === 0 || query['hub.challenge'].length > 1024) {
+      return reply.code(403).send({ error: 'Invalid webhook verification' });
+    }
+    return reply.type('text/plain').send(query['hub.challenge']);
+  });
+}
+
 /** Native Meta callbacks are authenticated before their account IDs are mapped to stored accounts. */
 export function registerInstagramWebhook(app: FastifyInstance, deps: InstagramWebhookDeps): void {
   app.register(async (hooks) => {
     hooks.addContentTypeParser('application/json', { parseAs: 'buffer', bodyLimit: 1024 * 1024 }, (_req, bytes, done) => done(null, bytes));
-    hooks.get('/integrations/instagram/webhook', async (req, reply) => {
-      const query = req.query as Record<string, unknown>;
-      if (query['hub.mode'] !== 'subscribe' || !matchesSecret(query['hub.verify_token'], deps.verifyToken) ||
-        typeof query['hub.challenge'] !== 'string' || (query['hub.challenge'].length === 0 || query['hub.challenge'].length > 1024)) {
-        return reply.code(403).send({ error: 'Invalid webhook verification' });
-      }
-      return reply.type('text/plain').send(query['hub.challenge']);
-    });
+    registerInstagramWebhookVerification(hooks, deps.verifyToken);
     hooks.post('/integrations/instagram/webhook', async (req, reply) => {
       const count = (result: string) => deps.metrics?.nativeWebhookDeliveries.inc({ result });
       try {

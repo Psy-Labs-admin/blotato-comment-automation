@@ -35,6 +35,18 @@ Publish a rule for that account and comment its keyword from an eligible second 
 
 The repo's contract tests cover signing, OAuth exchange and refresh, account-scoped sending, duplicate callbacks and error handling. The operator must perform the live acceptance check with a real Meta application, account and deployed HTTPS origin.
 
+## Verify the webhook address before account login
+
+The standalone listener serves `/integrations/instagram/webhook` on loopback. It has no operator or OAuth endpoints. From a built checkout, start it with a private environment file:
+
+```sh
+node --env-file=.local/instagram-webhook/listener.env dist/instagram/webhook-server.js
+```
+
+Set `INSTAGRAM_WEBHOOK_VERIFY_TOKEN` to a freshly generated random value, then enter the same value in the Meta webhook form. Choose the listener port with `PORT` and route the exact webhook path from your public HTTPS host to that port. With only the verification token configured, the listener answers Meta's GET challenge. It returns HTTP 503 to delivery attempts.
+
+To receive signed events on this listener, configure the real `META_APP_SECRET` and the workspace's migrated `DATABASE_URL` in the private environment and restart it. Verify the sender account is connected and subscribe to the required Instagram fields. Checking the callback address verifies the handshake only. The dashboard's **API setup with Unified login** uses a Facebook Login for Business configuration. The application's current account connection uses Instagram Login and does not yet consume the Unified Login configuration ID.
+
 ## Optional destinations
 
 CRM and external alerts use independently configured delivery services. Without an external CRM or notifier, leads and incidents remain in PostgreSQL and their outbox rows stay pending. Adding the relevant credentials and starting the corresponding relay permits delivery to those destinations.

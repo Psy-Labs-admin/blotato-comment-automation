@@ -7,6 +7,7 @@ import { createHmac } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { registerInstagramWebhook } from '../../src/instagram/webhook';
+import { createInstagramWebhookServer, loadInstagramWebhookServerConfig } from '../../src/instagram/webhook-server';
 import { systemClock } from '../../src/domain/clock';
 import { createTestDb } from '../helpers/db';
 import { seedTenant } from '../helpers/fixtures';
@@ -50,6 +51,30 @@ describe('native Instagram webhook', () => {
     expect((await delivery(batch(['first']))).statusCode).toBe(200);
     expect((await delivery(batch(['first']))).statusCode).toBe(200);
     expect((await data.db.query("SELECT id FROM inbox_events WHERE provider_event_key='first'")).rowCount).toBe(1);
+  });
+
+  it('ingests through the isolated listener with webhook credentials only', async () => {
+    const isolated = createInstagramWebhookServer(loadInstagramWebhookServerConfig({
+      INSTAGRAM_WEBHOOK_VERIFY_TOKEN: verify, META_APP_SECRET: secret, DATABASE_URL: data.url,
+    }), data.db);
+    const raw = JSON.stringify(batch(['isolated-listener-comment']));
+    const request = { method: 'POST' as const, url: '/integrations/instagram/webhook', payload: raw,
+      headers: { 'content-type': 'application/json', 'x-hub-signature-256': 'sha256=' + createHmac('sha256', secret).update(raw).digest('hex') } };
+    try {
+      expect((await isolated.inject({ ...request, headers: { 'content-type': 'application/json' } })).statusCode).toBe(401);
+      expect((await data.db.query("SELECT id FROM inbox_events WHERE provider_event_key='isolated-listener-comment'")).rowCount).toBe(0);
+      expect((await isolated.inject(request)).json()).toEqual({ received: true, accepted: 1 });
+      expect((await isolated.inject(request)).statusCode).toBe(200);
+      expect((await data.db.query("SELECT id FROM inbox_events WHERE provider_event_key='isolated-listener-comment'")).rowCount).toBe(1);
+      expect((await isolated.inject({ ...request, payload: 'x'.repeat(1024 * 1024 + 1) })).statusCode).toBe(413);
+      const unsupported = await isolated.inject({ ...request, headers: { 'content-type': 'application/private-test' } });
+      expect(unsupported.statusCode).toBe(415);
+      expect(unsupported.body).not.toContain(raw);
+      expect((await isolated.inject('/admin/connections')).statusCode).toBe(404);
+      expect((await isolated.inject('/console')).statusCode).toBe(404);
+    } finally {
+      await isolated.close();
+    }
   });
 
   it('uses the connected entry account, handles text and echo direction, and ignores unrelated accounts', async () => {
