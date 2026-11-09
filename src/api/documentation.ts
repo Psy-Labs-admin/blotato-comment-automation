@@ -43,8 +43,8 @@ export function documentationHtml(mode: 'workspace' | 'reference'): string {
 </header>
 <main><div class="api-instructions">${
     publicReference
-      ? 'This is the public reference. To execute requests, open /docs on your running workspace.'
-      : 'Choose Authorize and enter a workspace integration key. Try it out sends real requests to this installation.'
+      ? 'Browse the endpoints here. To try a request with your own data, open /docs/ on your running workspace.'
+      : 'Choose Authorize and paste your workspace key. Try it out calls this workspace, so any edits you make here will be saved.'
   }</div>
 <div id="swagger-ui"></div></main>
 </body></html>`;

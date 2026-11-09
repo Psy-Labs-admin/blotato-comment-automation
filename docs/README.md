@@ -1,21 +1,11 @@
 # Blotato handbook
 
-| Start here | What you will find |
-|---|---|
-| [Run the project](../README.md#run-it) | Install the workspace, sign in and save your first draft. |
-| [Integrate your admin or CRM](integration.md) | Issue a key, call the API, edit a draft and follow a conversation. |
-| [Swagger reference](https://psy-labs-admin.github.io/blotato-comment-automation/) · [Download OpenAPI](../src/api/openapi.json) | Methods, payloads, responses and operation IDs for client generation. |
-| [Product capabilities](capabilities.md) | Rules, account controls, conversations, leads, operational recovery and the conditions each feature requires. |
-| [Architecture](design.md) | Execution model, persistence, concurrency, failure modes, scaling and the limits of delivery guarantees. |
-| [Instagram and deployment](instagram.md) | Native login and gateway modes, public HTTPS, webhook verification and live acceptance. |
-| [Operations](operations.md) · [Monitoring](monitoring.md) | Readiness, recovery, retention, external alerts and deployment configuration. |
-| [Telegram](telegram.md) · [Tracing and load tests](observability.md) | Notification setup, receipt semantics, traces and traffic measurements. |
-| [Worker upgrades](worker-upgrades.md) · [Verification](testing.md) | History replay, process replacement, browser checks, API contracts and CI evidence. |
+**Trying it out?** [Start a workspace](../README.md#run-it), save a draft, then [connect your own admin](integration.md). You can [browse every API call in Swagger](https://psy-labs-admin.github.io/blotato-comment-automation/).
 
-## Design decisions
+**Reading the code?** Start with [the trip from comment to DM](design.md). Three short decisions explain [why we use Temporal](decisions/001-durable-orchestration.md), [when a send is safe to retry](decisions/002-external-send-guarantees.md) and [who gets the next reply](decisions/003-conversation-ownership.md). The [test guide](testing.md) points to the cases you can run.
 
-1. [Why Temporal owns orchestration and PostgreSQL owns application facts](decisions/001-durable-orchestration.md)
-2. [How the send ledger handles a lost acknowledgement](decisions/002-external-send-guarantees.md)
-3. [Why one conversation has one active owner](decisions/003-conversation-ownership.md)
+**Running an installation?**
 
-The [contribution statement](../AI_USAGE.md) describes the use of AI in the implementation and verification.
+- [Connect Instagram](instagram.md) and [see what operators can control](capabilities.md).
+- [Set up monitoring](monitoring.md) and [send incidents to Telegram](telegram.md).
+- [Recover a stuck run](operations.md), [inspect traces or measure load](observability.md), or [roll out a new worker](worker-upgrades.md).

@@ -3,7 +3,7 @@
   "info": {
     "title": "Blotato Automation API",
     "version": "1.0.0",
-    "description": "Manage workspace rules and read conversation results from your backend. Use a named integration key. Writes require write scope. Each operation is limited to the workspace that issued the key."
+    "description": "Connect your backend with a workspace key. Read keys can list runs and leads. Use a write key to edit, publish or pause a rule. Each key works in one workspace."
   },
   "servers": [
     {
@@ -19,27 +19,27 @@
   "tags": [
     {
       "name": "Workspace",
-      "description": "Authenticated workspace identity."
+      "description": "Which workspace does this key open?"
     },
     {
       "name": "Accounts",
-      "description": "Connected Instagram account readiness."
+      "description": "Check which Instagram accounts can publish."
     },
     {
       "name": "Drafts",
-      "description": "Revision-controlled editing and publication."
+      "description": "Save a rule, edit it and publish a revision."
     },
     {
       "name": "Automations",
-      "description": "Published automation definitions and activation."
+      "description": "Turn published rules on or off."
     },
     {
       "name": "Runs",
-      "description": "Execution records and factual timelines."
+      "description": "See what happened after a comment matched."
     },
     {
       "name": "Leads",
-      "description": "Captured leads and CRM state."
+      "description": "Get captured email addresses and check CRM delivery."
     }
   ],
   "paths": {
@@ -49,11 +49,11 @@
         "tags": [
           "Workspace"
         ],
-        "summary": "Get the authenticated workspace",
+        "summary": "Get your workspace",
         "x-required-permission": "read",
         "responses": {
           "200": {
-            "description": "Success.",
+            "description": "Your workspace ID and name.",
             "content": {
               "application/json": {
                 "schema": {
@@ -86,12 +86,12 @@
         "tags": [
           "Accounts"
         ],
-        "summary": "List connected Instagram accounts",
-        "description": "Lists real accounts in the authenticated workspace, including disconnected accounts and publication readiness.",
+        "summary": "List Instagram accounts",
+        "description": "Includes disconnected accounts. Check canPublish and issue before choosing an account for a rule.",
         "x-required-permission": "read",
         "responses": {
           "200": {
-            "description": "Success.",
+            "description": "Accounts in this workspace.",
             "content": {
               "application/json": {
                 "schema": {
@@ -125,7 +125,7 @@
         "x-required-permission": "read",
         "responses": {
           "200": {
-            "description": "Success.",
+            "description": "One page of drafts.",
             "content": {
               "application/json": {
                 "schema": {
@@ -162,11 +162,11 @@
           "Drafts"
         ],
         "summary": "Create an automation draft",
-        "description": "Saves a new draft at revision 1. Omitted content defaults to an empty object. Repeating this request can create another draft. If the response is lost, check the draft list before trying again.",
+        "description": "A new draft starts at revision 1 with empty content unless you supply it. If the response goes missing, check the draft list before creating another.",
         "x-required-permission": "write",
         "responses": {
           "201": {
-            "description": "Created.",
+            "description": "The saved draft, including its ID and revision.",
             "content": {
               "application/json": {
                 "schema": {
@@ -226,7 +226,7 @@
         "x-required-permission": "read",
         "responses": {
           "200": {
-            "description": "Success.",
+            "description": "The saved draft and its current revision.",
             "content": {
               "application/json": {
                 "schema": {
@@ -263,11 +263,11 @@
           "Drafts"
         ],
         "summary": "Update an automation draft",
-        "description": "Supply the current expectedRevision. Each successful update advances the revision. Omitted fields keep their values. Supplying content replaces that entire object. Set connectionId to null to clear the account. After a lost response or a 409 revision_conflict, fetch the draft before retrying.",
+        "description": "Send the current expectedRevision. Each save bumps the revision. Fields you leave out keep their values. Sending content replaces the whole object. Set connectionId to null to clear the account. If the response goes missing or you get a revision_conflict, fetch the draft before trying again.",
         "x-required-permission": "write",
         "responses": {
           "200": {
-            "description": "Success.",
+            "description": "The updated draft and its new revision.",
             "content": {
               "application/json": {
                 "schema": {
@@ -332,11 +332,11 @@
           "Drafts"
         ],
         "summary": "Publish a draft revision",
-        "description": "Validates complete content and account readiness, creates an immutable version, and activates the automation. Repeating the same expectedRevision after successful publication returns the existing version without creating another version or re-enabling a subsequently disabled automation. Editing the draft makes an older expectedRevision conflict. After an uncertain response, GET the draft and retry only the intended revision.",
+        "description": "Publishing checks the rule and account, freezes a version and turns the rule on. If the response goes missing, fetch the draft. Publishing the same unchanged revision again returns the original version, even if the rule was later disabled. An edit makes the older revision stale.",
         "x-required-permission": "write",
         "responses": {
           "200": {
-            "description": "Success.",
+            "description": "The draft, automation ID and published version.",
             "content": {
               "application/json": {
                 "schema": {
@@ -391,11 +391,11 @@
           "Automations"
         ],
         "summary": "List published automations",
-        "description": "Lists automations with an active published version, including disabled automations.",
+        "description": "Includes disabled rules that have a published version.",
         "x-required-permission": "read",
         "responses": {
           "200": {
-            "description": "Success.",
+            "description": "One page of published rules.",
             "content": {
               "application/json": {
                 "schema": {
@@ -437,7 +437,7 @@
         "x-required-permission": "read",
         "responses": {
           "200": {
-            "description": "Success.",
+            "description": "The rule and its active version.",
             "content": {
               "application/json": {
                 "schema": {
@@ -476,11 +476,11 @@
           "Automations"
         ],
         "summary": "Enable a published automation",
-        "description": "Rechecks account readiness before enabling. Repeating this action sets the same status and is safe to retry.",
+        "description": "Checks that the account is ready before turning the rule on. Safe to repeat.",
         "x-required-permission": "write",
         "responses": {
           "200": {
-            "description": "Success.",
+            "description": "The rule's status.",
             "content": {
               "application/json": {
                 "schema": {
@@ -533,11 +533,11 @@
           "Automations"
         ],
         "summary": "Disable a published automation",
-        "description": "Prevents new runs from starting. Existing runs may continue sending under their pinned rule version. Repeating the action sets the same status.",
+        "description": "Stops new runs. Anyone already in a conversation can finish on the version they started with. Safe to repeat.",
         "x-required-permission": "write",
         "responses": {
           "200": {
-            "description": "Success.",
+            "description": "The rule's status.",
             "content": {
               "application/json": {
                 "schema": {
@@ -590,11 +590,11 @@
           "Runs"
         ],
         "summary": "List automation runs",
-        "description": "Read recorded execution states. needsReview=true selects runs with unresolved unknown send outcomes; false selects runs without them. Omit it to return both.",
+        "description": "Use needsReview to find runs where a send still needs a decision.",
         "x-required-permission": "read",
         "responses": {
           "200": {
-            "description": "Success.",
+            "description": "One page of runs.",
             "content": {
               "application/json": {
                 "schema": {
@@ -640,7 +640,7 @@
                 "false"
               ]
             },
-            "description": "true selects runs with unresolved unknown sends; false selects runs without unknown sends. Omit to return both."
+            "description": "Use true for runs with unresolved sends, false for the rest. Leave it out for both."
           }
         ]
       }
@@ -655,7 +655,7 @@
         "x-required-permission": "read",
         "responses": {
           "200": {
-            "description": "Success.",
+            "description": "The run and its current status.",
             "content": {
               "application/json": {
                 "schema": {
@@ -693,12 +693,12 @@
         "tags": [
           "Runs"
         ],
-        "summary": "Get the recorded run timeline",
-        "description": "Chronological recorded facts. Accepted by Instagram does not mean delivered. Unknown send outcomes are held without automatic resend.",
+        "summary": "See what happened in a run",
+        "description": "Events appear in time order. Acceptance means Instagram took the request. Delivery is a separate question. An uncertain send stays on hold until it can be resolved.",
         "x-required-permission": "read",
         "responses": {
           "200": {
-            "description": "Success.",
+            "description": "The run's recorded events.",
             "content": {
               "application/json": {
                 "schema": {
@@ -737,11 +737,11 @@
           "Leads"
         ],
         "summary": "List captured leads",
-        "description": "Lists captured email leads and their CRM synchronization state. Email ownership has not been verified.",
+        "description": "Returns captured addresses and their CRM status. We check email format. Ownership is unverified.",
         "x-required-permission": "read",
         "responses": {
           "200": {
-            "description": "Success.",
+            "description": "One page of leads.",
             "content": {
               "application/json": {
                 "schema": {
@@ -780,7 +780,7 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "Integration API key",
-        "description": "Enter the key value only. The client sends it in the `Authorization: Bearer` header. Read keys can retrieve leads, including their email addresses. Write keys also authorize rule changes."
+        "description": "Paste the key itself. Swagger adds the Bearer header. Read keys can see captured email addresses. Write keys can also change rules."
       }
     },
     "parameters": {
@@ -788,7 +788,7 @@
         "name": "id",
         "in": "path",
         "required": true,
-        "description": "Workspace-scoped resource UUID.",
+        "description": "The resource UUID in this workspace.",
         "schema": {
           "type": "string",
           "format": "uuid"
@@ -797,7 +797,7 @@
       "Limit": {
         "name": "limit",
         "in": "query",
-        "description": "Maximum page size.",
+        "description": "How many items to return at most.",
         "schema": {
           "type": "integer",
           "minimum": 1,
@@ -808,7 +808,7 @@
       "Cursor": {
         "name": "cursor",
         "in": "query",
-        "description": "Use nextCursor from the previous page. UUID of the last returned resource, resolved within this workspace. Unknown or foreign-workspace cursors return 400. Pages use createdAt descending, then id descending. Null nextCursor means no further page.",
+        "description": "Pass nextCursor from the last page. Items sort by createdAt descending, then id descending for ties. A null nextCursor means you reached the end. An unknown cursor or one from another workspace returns 400.",
         "schema": {
           "type": "string",
           "format": "uuid"
@@ -817,7 +817,7 @@
     },
     "responses": {
       "400": {
-        "description": "Invalid input, unsupported query parameter, invalid cursor, or incomplete automation definition.",
+        "description": "Check the request fields, query parameters and cursor. For a publish request, check the rule content too.",
         "content": {
           "application/json": {
             "schema": {
@@ -827,7 +827,7 @@
         }
       },
       "401": {
-        "description": "Missing, invalid, or revoked integration bearer key.",
+        "description": "Supply a valid integration key. A revoked key also gets this response.",
         "content": {
           "application/json": {
             "schema": {
@@ -846,7 +846,7 @@
         }
       },
       "403": {
-        "description": "A write key is required for mutations. If an X-Tenant-Id header is supplied, it must match the workspace bound to the key; a contradictory value returns TENANT_MISMATCH.",
+        "description": "Use a write key to change a rule. If you send X-Tenant-Id, it must match the workspace on the key. A mismatch returns TENANT_MISMATCH.",
         "content": {
           "application/json": {
             "schema": {
@@ -870,7 +870,7 @@
         }
       },
       "404": {
-        "description": "Resource not found in the authenticated workspace.",
+        "description": "This workspace has no resource with that ID.",
         "content": {
           "application/json": {
             "schema": {
@@ -880,7 +880,7 @@
         }
       },
       "409": {
-        "description": "State conflict. Inspect code, refresh the resource, and resolve the stated reason before retrying.",
+        "description": "Read the error code and fetch the latest record before retrying.",
         "content": {
           "application/json": {
             "schema": {
@@ -934,7 +934,7 @@
         }
       },
       "500": {
-        "description": "An unexpected server error occurred.",
+        "description": "The server hit an unexpected error.",
         "content": {
           "application/json": {
             "schema": {
@@ -1113,7 +1113,7 @@
         },
         "required": [],
         "additionalProperties": false,
-        "description": "Partial editor content may be saved. Publishing validates the complete content: a matchable keyword, nonempty reply and prompt, an HTTP(S) link without credentials, and clarification text when maxClarifications is nonzero. Empty or omitted postIds targets all supported posts. Defaults at publication: timeoutHours=72 and maxClarifications=1."
+        "description": "Save as much of a draft as you have. To publish, supply a matchable keyword, public reply, email prompt and HTTP(S) link without credentials. Include clarification text if maxClarifications is above zero. Empty or omitted postIds covers all supported posts. Defaults are 72 hours and one clarification."
       },
       "Draft": {
         "type": "object",
@@ -1210,7 +1210,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 200,
-            "description": "Trimmed before validation and storage."
+            "description": "We trim surrounding whitespace before checking and saving this value."
           },
           "content": {
             "$ref": "#/components/schemas/DraftContent"
@@ -1236,7 +1236,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 200,
-            "description": "Trimmed before validation and storage."
+            "description": "We trim surrounding whitespace before checking and saving this value."
           },
           "content": {
             "$ref": "#/components/schemas/DraftContent"
@@ -1293,7 +1293,7 @@
           },
           "email": {
             "type": "string",
-            "description": "Format-valid email captured from a participant; ownership is not verified."
+            "description": "The address passed a format check. Ownership is unverified."
           },
           "runId": {
             "type": "string",

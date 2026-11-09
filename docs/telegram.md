@@ -1,53 +1,53 @@
 # Telegram incident notifications
 
-Notifications go to one deployment-managed operator chat. This is an operational channel, not a customer notification setting. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in the deployment secret environment. Add the bot to the operator chat and grant permission to send messages. Do not enter bot tokens or chat identifiers in the application UI, URLs, source control or support tickets.
+Set deployment secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` for one trusted operator chat. Add the bot and grant send permission. Keep both values out of UI, URLs, tracked files and tickets.
 
-Starting the application does not probe Telegram. An absent configuration leaves notifications queued; it never marks them delivered. The operations console reports configuration and recorded delivery facts. A configured channel alone does not prove credentials, permissions or delivery.
+Open **Operations** to see which alerts went out. Starting the service is quiet. If you configure the bot later, pending alerts are still in the queue.
 
 ## Check the channel
 
-After building, run the read-only operator check from the deployment environment:
+After building, run this from the deployment environment.
 
 ```sh
 node --env-file-if-exists=.env dist/alerts/check.js
 ```
 
-This explicitly calls `getMe` and `getChat`. It sends no messages. Successful output confirms bot authentication and chat visibility, with `deliveryTested: false`. Chat visibility does not establish sending permission.
-
-To verify delivery, an operator may explicitly send one fixed test message:
+This calls `getMe` and `getChat`. A successful check means the bot can see the chat. To find out whether it can post there, send one test message.
 
 ```sh
 node --env-file-if-exists=.env dist/alerts/check.js --send-test
 ```
 
-This command checks the bot/chat, then sends one message per invocation. It has no retry loop and does not create an incident or claim production monitoring health. Do not run it as a health check or scheduled task. A failure after an unknown network outcome may still have delivered the message; inspect the chat before repeating. Neither command prints credentials, chat IDs, Telegram descriptions or request URLs. Normal development tests use loopback transports and never invoke these commands against Telegram.
+Each invocation sends once without retries. Keep it out of scheduled health checks. After uncertain outcomes, inspect the chat before repeating. Commands hide credentials, chat IDs, URLs and provider descriptions.
 
 ## Delivery behavior
 
-The durable outbox owns retries. Telegram HTTP status alone is insufficient: delivery requires an `ok: true` Bot API envelope and a valid Message receipt. `ok: false`, malformed successful responses, invalid receipts, redirects, network failures and timeouts are handled explicitly. Provider descriptions are discarded; only fixed error codes are persisted.
+The relay keeps each alert in Postgres until it has a result. To mark it accepted, it needs `ok: true` and a valid Telegram message receipt. Malformed responses, redirects, timeouts and network failures leave acceptance uncertain. Only fixed error codes are stored.
 
-A 429 honors `parameters.retry_after`. A missing/invalid hint waits 60 seconds. The database records a destination flood wait shared by all relay processes. Telegram destination identity uses the numeric bot ID prefix and canonical chat ID, independent of the secret part of the bot token. Rotating the same bot token retains the flood wait and accepted-opening context; replacing the bot or changing the chat creates a different destination. Prefer a numeric chat ID: switching from an @username to its numeric ID is treated as a destination change because resolving aliases would require a network request. Webhook identity uses its normalized endpoint without its authentication token; rotating that token likewise retains destination context. Concurrent deliveries to that destination use a database session advisory lock; no SQL transaction is held during HTTP. The lock is released (or the pooled session discarded) on every exit. Other incident notifications wait without consuming retry attempts. Failures consume attempts and stop at the relay limit (25 by default); explicit token/chat/request rejections stop immediately. Dead alert rows require operator review and cannot be blindly replayed through the ordinary retry API.
+If Telegram says “slow down” (429), every relay serving that chat waits for `parameters.retry_after`, or 60 seconds by default. A Postgres lock keeps two relays from sending at once. Waiting consumes no attempts. Failed attempts stop at the relay limit, 25 by default. Explicit token, chat or request rejection stops immediately. Review dead rows through Operations. The ordinary retry API cannot replay them.
 
-For each incident, earlier pending notifications finish before later ones. If an incident has recovered before its first opening is accepted, obsolete opening/update/recovery notifications are recorded as `skipped`. If an opening was accepted, the recovery follows it. An update becomes an opening when no earlier notification was accepted. The incident journal remains the source of history even when notifications are skipped. After a permanent failure, later notifications can proceed; their meaning reflects whether an earlier delivery was accepted.
+Use a numeric chat ID. Destination identity combines the numeric bot ID and canonical chat ID. Rotate the token on the same bot and the relay still remembers rate limits and which incidents it already announced. Changing bot, chat or username-to-numeric spelling creates a new destination. Webhook destinations similarly retain context when only their authentication token rotates.
 
-An accepted provider receipt is persisted before acknowledging the outbox row. Replaying an already accepted row does not send again, including after a destination change; its receipt remains associated with the original destination. Retries of an unconfirmed delivery record the currently attempted destination. Future updates become openings when the current destination has no accepted opening, and recovery is skipped if the current destination never accepted an incident notification. Changing destination does not replay historical deliveries. Telegram provides no sendMessage idempotency key: a crash after Telegram accepts but before the receipt is saved, or a timeout after acceptance, can produce a duplicate on retry. `unknown` records this uncertainty; there is no exactly-once guarantee. `accepted` means Telegram accepted the message, not that an operator read it. Recovery messages describe the recorded condition clearing, not independent end-to-end verification.
+If an incident clears before Telegram accepts the opening alert, the relay skips the stale messages. If the chat saw the opening alert, it gets the recovery too. Switching chats starts a separate receipt history.
 
-`alert_deliveries` records tenant, incident, outbox reference, channel, an opaque destination hash, attempt time/count, outcome, safe reason code, accepted time/message receipt and retry deadline. Tenant-scoped monitoring must filter by the authenticated tenant. Destination hashes, provider message IDs and raw configuration are internal diagnostics and are not exposed in the console. Shared flood waits are enforced internally without revealing another tenant's incident.
+The receipt is saved before the outbox acknowledgement, so replay of a saved acceptance sends nothing. Telegram has no `sendMessage` idempotency key. Acceptance followed by a crash before receipt storage, or a timeout, can duplicate on retry. `unknown` records that uncertainty. `accepted` confirms provider acceptance. Only someone in the chat can tell you whether they read it.
 
-Messages contain fixed incident playbooks, internal workspace/connection references, affected automation run counts and timestamps. Playbooks direct operators to Accounts, Conversations and Operations in the admin console. Incident links use the actual `#incident=<id>` route, with `#operations` as a fallback. They exclude tenant display names, Instagram usernames, participant identifiers, email addresses, message bodies and raw upstream errors. A configured console link is accepted only for HTTPS (or local HTTP during development), without embedded credentials/query strings, and points to the console. Access still requires normal console authentication. Only trusted deployment operators should access the central chat; this design is unsuitable for a customer-accessible group.
+Messages contain fixed playbooks, internal workspace/connection references, affected-run counts and timestamps. Customer names, usernames, emails, participant IDs, message bodies and raw errors are excluded. `CONSOLE_ORIGIN` supplies authenticated incident links through `#incident=<id>`, falling back to `#operations`. It accepts HTTPS or local development HTTP without embedded credentials or query strings.
 
 ## Outcomes and troubleshooting
 
-| Outcome / code | Meaning and action |
-| --- | --- |
-| `accepted` | Provider accepted a valid response; see accepted time. |
-| `skipped` / `alert_obsolete` | Incident recovered before an opening was accepted. Review the incident journal if needed. |
-| `telegram_rate_limited` | Automatic destination-wide wait; do not manually retry. |
-| `telegram_token_rejected` | Replace the deployment bot token, then run the read-only check. |
-| `telegram_chat_forbidden` | Check bot membership and send permission in the operator chat. |
-| `telegram_request_rejected` | Inspect deployment chat configuration; provider rejected the request. |
-| `telegram_connection_unknown`, `telegram_service_unavailable`, `telegram_response_invalid`, `telegram_confirmation_invalid` | Acceptance is unconfirmed; bounded retry may duplicate. Inspect the chat and delivery history. |
-| `alert_delivery_unconfigured` | Configure a deployment channel. Work remains pending without consuming attempts. |
-| `alert_scope_invalid` | Invalid outbox/tenant/incident scope; no send was attempted. Investigate data integrity. |
+| Outcome or code | Next step |
+|---|---|
+| `accepted` | Check accepted time and the chat. |
+| `skipped` / `alert_obsolete` | Read the incident journal if history matters. |
+| `telegram_rate_limited` | Let the shared automatic wait expire. |
+| `telegram_token_rejected` | Replace the token and run the read-only check. |
+| `telegram_chat_forbidden` | Check membership and send permission. |
+| `telegram_request_rejected` | Check deployment chat configuration. |
+| `telegram_connection_unknown`, `telegram_service_unavailable`, `telegram_response_invalid`, `telegram_confirmation_invalid` | Inspect chat and receipts. Retry may duplicate. |
+| `alert_delivery_unconfigured` | Configure the deployment channel. |
+| `alert_scope_invalid` | Investigate tenant/incident/outbox integrity. No send occurred. |
 
-The [official Bot API response contract](https://core.telegram.org/bots/api#making-requests), [response parameters](https://core.telegram.org/bots/api#responseparameters), [sendMessage](https://core.telegram.org/bots/api#sendmessage), and [getChat](https://core.telegram.org/bots/api#getchat) define the transport behavior used here.
+Receipts store attempts, outcome, safe reason, accepted time and retry deadline. Console diagnostics hide destination hashes, provider IDs and configuration. The journal records opening, latest occurrence and resolution. Recovery describes that condition clearing.
+
+For independent API/role alerts through Alertmanager, follow [external monitoring](monitoring.md#enable-telegram-for-one-selected-operator).

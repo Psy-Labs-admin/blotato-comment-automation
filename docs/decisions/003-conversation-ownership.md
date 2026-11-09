@@ -1,32 +1,11 @@
-# ADR 003: One active run per conversation, serialised by one row lock
+# ADR 003 — One conversation gets one active run
 
-**Status:** accepted
+Accepted.
 
-## Context
+Two “pricing” comments should not produce two questions competing for the same reply. An email arriving while the question is being sent needs a clear place to wait.
 
-Someone comments "pricing" under two posts, or two automations match the same comment, or an email
-arrives while the question is still being sent. Without a rule, two runs ask the same person for
-their email at once. Their replies become ambiguous, and messages can be sent twice. Most races in
-this system are within one conversation (one account × one participant).
+A conversation is one connected account and participant. Before touching a reply, a send or the end of a run, each worker locks that conversation’s row first. `owner_run_id` allows one active run. Competing triggers record `conversation_busy`. Matching rules use priority, then ID, to choose one winner.
 
-## Decision
+Ownership releases after the run finishes and every send settles. Unknown sends keep it held. Cooldown applies if Instagram accepted at least one send in the run. Cancellation, opt-out and takeover are checked at each send reservation.
 
-- `conversations` has one row per (connected account, participant). **Every state change in a
-  conversation takes that row's lock first**: ingest (sequence numbers), routing (ownership), send
-  reservation (question boundary and deadline), wait evaluation (consumption, expiry), finalisation.
-- `conversations.owner_run_id` is the single active run. A new trigger while it is set is recorded
-  as `conversation_busy`. Among several matching automations, one wins by priority; the others are
-  audited as `lower_priority`.
-- Ownership is released only when the run is finished **and** none of its sends is
-  `in_flight`/`unknown`. After release, `cooldown_seconds` prevents an immediate re-trigger.
-- Opt-out (STOP), human takeover and cancel are conversation/run controls checked by every send.
-
-## Consequences
-
-- (+) The races that matter (email vs question ack, two emails, email vs timer, STOP vs
-  clarification) become sequential decisions with one outcome each.
-- (+) Contention is per person. A viral post spreads across many rows and does not create a hotspot.
-- (−) A person cannot be in two automations at once. That is the intended product rule for v1. A
-  future "queue the second automation" option would build on the same ownership row.
-- (−) Without a platform `reply_to` reference we infer that a DM answers our question (boundary + one
-  active run). We cannot prove it, and the design document states this.
+This serializes the awkward races without locking every participant together. It also means concurrent automations for one person are outside v1. Without a reliable reply reference, we still infer which question a DM answers.
