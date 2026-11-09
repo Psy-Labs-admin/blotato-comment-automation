@@ -110,6 +110,77 @@ describe('supported public API', () => {
         .rows[0].n,
     ).toBe(0);
   });
+  it('deduplicates simultaneous keyed creates across credentials and replays the original response after edits', async () => {
+    const replacement = await createIntegrationKey(data.db, tenant.tenantId, 'Replacement', 'write');
+    const key = randomUUID();
+    const headers = { ...write, 'idempotency-key': key };
+    const rotated = { authorization: 'Bearer ' + replacement.token, 'idempotency-key': key };
+    const payload = { name: '  Retry safely  ', content, connectionId: tenant.connectionId.toUpperCase() };
+    const replies = await Promise.all(Array.from({ length: 8 }, (_, i) => post('/drafts', payload, i % 2 ? headers : rotated)));
+    expect(replies.map((r) => r.statusCode)).toEqual(Array(8).fill(201));
+    const original = replies[0].json();
+    for (const response of replies) expect(response.json()).toEqual(original);
+    expect((await data.db.query('SELECT count(*)::int n FROM automation_drafts WHERE tenant_id=$1 AND name=$2',
+      [tenant.tenantId, 'Retry safely'])).rows[0].n).toBe(1);
+    const edit = await app.inject({ method: 'PATCH', url: '/api/v1/drafts/' + original.draft.id,
+      headers: write, payload: { expectedRevision: 1, name: 'Changed since creation' } });
+    expect(edit.statusCode).toBe(200);
+    const replay = await post('/drafts', { connectionId: tenant.connectionId, content: { ...content }, name: 'Retry safely' }, headers);
+    expect(replay.statusCode).toBe(201);
+    expect(replay.json()).toEqual(original);
+    expect((await post('/drafts', { ...payload, name: 'Different' }, headers)).json().code).toBe('idempotency_conflict');
+    expect((await post('/drafts', { ...payload, name: 'Different' }, headers)).statusCode).toBe(409);
+    expect((await post('/drafts', payload, { ...read, 'idempotency-key': key })).statusCode).toBe(403);
+    await data.db.query('UPDATE integration_keys SET revoked_at=now() WHERE id=$1', [replacement.id]);
+    expect((await post('/drafts', payload, rotated)).statusCode).toBe(401);
+    expect((await post('/drafts', payload, headers)).json()).toEqual(original);
+    const third = await createIntegrationKey(data.db, tenant.tenantId, 'New credential', 'write');
+    expect((await post('/drafts', payload, { authorization: 'Bearer ' + third.token, 'idempotency-key': key })).json()).toEqual(original);
+    expect((await post('/drafts', { name: 'Other workspace' }, { ...foreign, 'idempotency-key': key })).statusCode).toBe(201);
+  });
+  it('uses normalized equality, preserves array order, and leaves unkeyed creates independent', async () => {
+    const headers = { ...write, 'idempotency-key': randomUUID() };
+    const first = await post('/drafts', { name: ' Defaults ' }, headers);
+    expect((await post('/drafts', { name: 'Defaults', content: {} }, headers)).json()).toEqual(first.json());
+    for (const changed of [{ name: 'Defaults', content }, { name: 'Defaults', connectionId: tenant.connectionId }])
+      expect((await post('/drafts', changed, headers)).statusCode).toBe(409);
+    const ordered = { ...write, 'idempotency-key': randomUUID() };
+    expect((await post('/drafts', { name: 'Order', content: { postIds: [' a ', 'b'] } }, ordered)).statusCode).toBe(201);
+    expect((await post('/drafts', { content: { postIds: ['a', 'b'] }, name: 'Order' }, ordered)).statusCode).toBe(201);
+    expect((await post('/drafts', { name: 'Order', content: { postIds: ['b', 'a'] } }, ordered)).statusCode).toBe(409);
+    const one = await post('/drafts', { name: 'No key' });
+    const two = await post('/drafts', { name: 'No key' });
+    expect(one.statusCode).toBe(201);
+    expect(two.statusCode).toBe(201);
+    expect(one.json().draft.id).not.toBe(two.json().draft.id);
+  });
+  it('rejects ambiguous or oversized keys and rolls back failed keyed attempts atomically', async () => {
+    for (const key of ['', ' ', 'a,b', 'a b', 'x'.repeat(129), 'é', '"quoted"'])
+      expect((await post('/drafts', { name: 'Bad key' }, { ...write, 'idempotency-key': key })).statusCode).toBe(400);
+    const duplicate = await app.inject({ method: 'POST', url: '/api/v1/drafts',
+      headers: { ...write, 'idempotency-key': ['same', 'same'] }, payload: { name: 'Duplicate header' } });
+    expect(duplicate.statusCode).toBe(400);
+    const boundary = { ...write, 'idempotency-key': 'x'.repeat(128) };
+    expect((await post('/drafts', { name: 'Boundary' }, boundary)).statusCode).toBe(201);
+    const failed = { ...write, 'idempotency-key': randomUUID() };
+    expect((await post('/drafts', { name: 'Invalid account', connectionId: other.connectionId }, failed)).statusCode).toBe(404);
+    expect((await post('/drafts', { name: 'Valid after failure' }, failed)).statusCode).toBe(201);
+    const rollbackKey = randomUUID();
+    await data.db.query(`ALTER TABLE draft_create_requests ADD CONSTRAINT test_response_failure
+      CHECK (response IS NULL OR response->'draft'->>'name' <> 'Forced rollback')`);
+    try {
+      expect((await post('/drafts', { name: 'Forced rollback' }, { ...write, 'idempotency-key': rollbackKey })).statusCode).toBe(500);
+      expect((await data.db.query('SELECT 1 FROM automation_drafts WHERE name=$1', ['Forced rollback'])).rowCount).toBe(0);
+      expect((await data.db.query('SELECT 1 FROM draft_create_requests WHERE idempotency_key=$1', [rollbackKey])).rowCount).toBe(0);
+    } finally {
+      await data.db.query('ALTER TABLE draft_create_requests DROP CONSTRAINT test_response_failure');
+    }
+    expect((await post('/drafts', { name: 'Forced rollback' }, { ...write, 'idempotency-key': rollbackKey })).statusCode).toBe(201);
+    const race = { ...write, 'idempotency-key': randomUUID() };
+    const results = await Promise.all(['Race one', 'Race two'].map((name) => post('/drafts', { name }, race)));
+    expect(results.map((r) => r.statusCode).sort()).toEqual([201, 409]);
+    expect(results.find((r) => r.statusCode === 409)!.json().code).toBe('idempotency_conflict');
+  });
   it('blocks unsafe publication and rejects invalid bodies and pagination', async () => {
     const incomplete = (await post('/drafts', { name: 'Incomplete' })).json().draft;
     expect((await post('/drafts/' + incomplete.id + '/publish', { expectedRevision: 1 })).statusCode).toBe(409);

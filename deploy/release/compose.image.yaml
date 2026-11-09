@@ -1,0 +1,7 @@
+# Installed with the production release script; requires Docker Compose >= 2.24.4.
+services:
+  app:
+    build: !reset null
+    image: ${BLOTATO_IMAGE:?Verified release image required}
+    platform: linux/amd64
+    pull_policy: never

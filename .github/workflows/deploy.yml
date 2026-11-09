@@ -1,0 +1,137 @@
+name: Deploy backend
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Where to run this release
+        type: choice
+        required: true
+        default: rehearsal
+        options:
+          - rehearsal
+          - production
+      run_id:
+        description: Successful main push run ID from checks.yml (artifact retained for 14 days)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: backend-deploy-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: ${{ inputs.target == 'production' && 'production' || 'api-rehearsal' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Resolve a trusted verification run
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ inputs.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[1-9][0-9]{0,15}$ ]]
+          gh api "repos/$GH_REPO/actions/runs/$RUN_ID" > run.json
+          gh api "repos/$GH_REPO/actions/workflows/checks.yml" > workflow.json
+          sha=$(jq -er --arg repo "$GH_REPO" --slurpfile workflow workflow.json '
+            select(.repository.full_name == $repo and .head_repository.full_name == $repo
+              and .event == "push" and .head_branch == "main" and .status == "completed"
+              and .conclusion == "success" and .workflow_id == $workflow[0].id
+              and .path == ".github/workflows/checks.yml") | .head_sha
+          ' run.json)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Download only this run's backend artifact
+        uses: actions/download-artifact@v6
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.run_id }}
+          name: backend-${{ steps.release.outputs.sha }}
+          path: release
+      - name: Verify release bytes and image identity
+        id: image
+        env:
+          COMMIT: ${{ steps.release.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          [[ $(find . -mindepth 1 -maxdepth 1 -type f | wc -l) -eq 3 ]]
+          [[ ! -L image.tar.gz && ! -L image.id && ! -L SHA256SUMS ]]
+          [[ $(wc -l < SHA256SUMS) -eq 2 ]]
+          grep -Eq '^[0-9a-f]{64}  image\.tar\.gz$' SHA256SUMS
+          grep -Eq '^[0-9a-f]{64}  image\.id$' SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          image_id=$(cat image.id)
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker image load --input image.tar.gz > /dev/null
+          [[ $(docker image inspect --format '{{.Id}}' "blotato-backend:$COMMIT") == "$image_id" ]]
+          [[ $(docker image inspect --format '{{.Os}}/{{.Architecture}}' "blotato-backend:$COMMIT") == linux/amd64 ]]
+          echo "id=$image_id" >> "$GITHUB_OUTPUT"
+          echo "archive_sum=$(sha256sum image.tar.gz | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Get the host setup for the rehearsal
+        if: inputs.target == 'rehearsal'
+        uses: actions/checkout@v5
+        with:
+          path: source
+          persist-credentials: false
+      - name: Activate the release on a disposable Linux host
+        if: inputs.target == 'rehearsal'
+        working-directory: source
+        env:
+          COMMIT: ${{ steps.release.outputs.sha }}
+        run: bash tests/release/activate-on-runner.sh ../release "$COMMIT"
+      - name: Transfer and activate the verified image
+        if: inputs.target == 'production'
+        env:
+          COMMIT: ${{ steps.release.outputs.sha }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+          ARCHIVE_SUM: ${{ steps.image.outputs.archive_sum }}
+          PUBLIC_HOST: ${{ vars.PRODUCTION_PUBLIC_HOST }}
+          DEPLOY_HOST: ${{ secrets.PRODUCTION_HOST }}
+          DEPLOY_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PRODUCTION_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PUBLIC_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$ && ${#PUBLIC_HOST} -le 253 ]]
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$ ]]
+          [[ ${#DEPLOY_HOST} -le 253 && -n "$DEPLOY_KEY" && -n "$KNOWN_HOSTS" ]]
+          echo "::add-mask::$DEPLOY_HOST"
+          install -m 700 -d "$RUNNER_TEMP/production-ssh"
+          trap 'rm -rf "$RUNNER_TEMP/production-ssh"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$RUNNER_TEMP/production-ssh/key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$RUNNER_TEMP/production-ssh/known_hosts"
+          chmod 600 "$RUNNER_TEMP/production-ssh/"*
+          ssh -F /dev/null -T -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/production-ssh/known_hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -i "$RUNNER_TEMP/production-ssh/key" \
+            "blotato-deploy@$DEPLOY_HOST" \
+            "activate $COMMIT $IMAGE_ID $ARCHIVE_SUM" < release/image.tar.gz
+          curl --fail --silent --show-error --proto '=https' --connect-timeout 5 --max-time 8 \
+            --retry 5 --retry-all-errors --retry-delay 2 "https://$PUBLIC_HOST/ready" | jq -e '.ok == true'
+      - name: Record the deployed release
+        env:
+          COMMIT: ${{ steps.release.outputs.sha }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+          TARGET: ${{ inputs.target }}
+          SOURCE_RUN: ${{ inputs.run_id }}
+        run: |
+          {
+            printf '### Backend deployment\n\n'
+            printf 'Target: `%s` · Candidate commit: `%s`\n\n' "$TARGET" "$COMMIT"
+            printf 'Docker image ID: `%s`\n\n' "$IMAGE_ID"
+            printf '[Verified build](%s/%s/actions/runs/%s)\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$SOURCE_RUN"
+          } >> "$GITHUB_STEP_SUMMARY"

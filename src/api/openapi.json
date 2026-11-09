@@ -162,11 +162,11 @@
           "Drafts"
         ],
         "summary": "Create an automation draft",
-        "description": "A new draft starts at revision 1 with empty content unless you supply it. If the response goes missing, check the draft list before creating another.",
+        "description": "Send one Idempotency-Key per intended draft. If the response is lost, retry with the same key and body. You get the original revision-1 response even after an edit or API key rotation. Each call needs a valid write key. The workspace keeps successful keys indefinitely. Changed input returns 409 idempotency_conflict. A failed create leaves the key available. Without the header each call creates a new draft.",
         "x-required-permission": "write",
         "responses": {
           "201": {
-            "description": "The saved draft, including its ID and revision.",
+            "description": "The saved draft at revision 1. A replay returns the same response.",
             "content": {
               "application/json": {
                 "schema": {
@@ -189,6 +189,20 @@
           },
           "404": {
             "$ref": "#/components/responses/404"
+          },
+          "409": {
+            "description": "The key already belongs to different normalized input. Reuse the original input to retry, or choose a new key for a new draft.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "This idempotency key was used with different draft input.",
+                  "code": "idempotency_conflict"
+                }
+              }
+            }
           }
         },
         "requestBody": {
@@ -213,7 +227,22 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "One case-sensitive token per logical draft creation, shared by all API credentials in the workspace. Send exactly one header. Same key with changed normalized input returns 409.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
+            },
+            "example": "pricing-rule-2026-11-10"
+          }
+        ]
       }
     },
     "/drafts/{id}": {

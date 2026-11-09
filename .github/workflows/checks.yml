@@ -1,4 +1,4 @@
-name: Verify interview project
+name: Verify and stage backend
 
 on:
   push:
@@ -11,6 +11,8 @@ permissions:
 
 jobs:
   verify:
+    env:
+      IMAGE: blotato-backend:${{ github.sha }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -26,14 +28,35 @@ jobs:
       - name: Exercise the default Docker quickstart twice
         run: node scripts/workspace-smoke.cjs --docker-workspace
       - name: Build deployable image
-        run: docker build --tag blotato-workspace:checks .
+        run: docker build --label "org.opencontainers.image.revision=$GITHUB_SHA" --tag "$IMAGE" .
       - name: Verify runtime assets
         run: >-
-          docker run --rm blotato-workspace:checks node -e
+          docker run --rm "$IMAGE" node -e
           "require('./dist/api/server');
           const fs=require('node:fs');
           for(const f of ['dist/ui/index.html','dist/api/openapi.json','scripts/api-key.cjs']) fs.accessSync(f);
           for(const a of require('./dist/api/documentation').documentationAssets) fs.accessSync(a.file)"
+      - name: Exercise the packaged API on pull requests
+        if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
+        run: node tests/release/rehearse.cjs "$IMAGE"
+      - name: Save the tested build for staging and promotion
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          docker image save "$IMAGE" | gzip -1 > release/image.tar.gz
+          docker image inspect --format '{{.Id}}' "$IMAGE" > release/image.id
+          cd release
+          sha256sum image.tar.gz image.id > SHA256SUMS
+      - name: Store the release image
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v6
+        with:
+          name: backend-${{ github.sha }}
+          path: release/
+          retention-days: 14
+          compression-level: 0
+          overwrite: true
       - name: Package the public API reference
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'Psy-Labs-admin/blotato-comment-automation'
         uses: actions/upload-pages-artifact@v5
@@ -43,7 +66,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: verification-${{ github.sha }}
+          name: verification-${{ github.sha }}-${{ github.run_attempt }}
           retention-days: 30
           path: |
             coverage/
@@ -52,9 +75,41 @@ jobs:
             reports/browser.xml
             reports/acceptance/
 
+  stage-backend:
+    name: Deploy to temporary API staging
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: api-rehearsal
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v6
+        with:
+          name: backend-${{ github.sha }}
+          path: release
+      - name: Verify and load the exact image
+        working-directory: release
+        run: |
+          set -euo pipefail
+          sha256sum --check --strict SHA256SUMS
+          docker image load --input image.tar.gz
+          actual=$(docker image inspect --format '{{.Id}}' "blotato-backend:$GITHUB_SHA")
+          test "$actual" = "$(cat image.id)"
+          printf 'Commit `%s` · Docker image ID `%s`\n' "$GITHUB_SHA" "$actual" >> "$GITHUB_STEP_SUMMARY"
+      - name: Rehearse concurrent writes and restart against PostgreSQL
+        run: node tests/release/rehearse.cjs "blotato-backend:$GITHUB_SHA"
+      - name: Exercise the production activation and failed-transfer paths
+        run: bash tests/release/activate-on-runner.sh release "$GITHUB_SHA"
+
   publish-reference:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'Psy-Labs-admin/blotato-comment-automation'
-    needs: verify
+    needs: stage-backend
     runs-on: ubuntu-latest
     permissions:
       pages: write

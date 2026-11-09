@@ -35,4 +35,10 @@ Say Instagram accepts the DM, then the connection drops before we get a response
 
 Run `npm run verify` for the full conversation, duplicate webhooks and worker crashes against disposable Postgres and Temporal. The tests control Instagram's responses. The live Meta check covered webhook verification only. A real comment-to-DM run still needs a connected account and a running worker. [Test guide](docs/testing.md) · [Instagram setup](docs/instagram.md)
 
-[Handbook](docs/README.md) · [CI results](https://github.com/Psy-Labs-admin/blotato-comment-automation/actions/workflows/checks.yml) · [How we used AI](AI_USAGE.md)
+## Try a release
+
+What if your admin saves a draft twice because the first response got lost? Send the same `Idempotency-Key` on both calls. You get one draft, even across a restart. [Try the two requests](docs/integration.md)
+
+GitHub deploys the packaged API and Postgres on a temporary runner and exercises that retry on every push to `main`. Open the run summary to see the result and image ID. To ship those same bytes to your server, choose the successful run in **Deploy backend**. [Builds and staging runs](https://github.com/Psy-Labs-admin/blotato-comment-automation/actions/workflows/checks.yml) · [Deployment setup](docs/releases.md)
+
+[Handbook](docs/README.md) · [How we used AI](AI_USAGE.md)

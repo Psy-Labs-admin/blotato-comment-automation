@@ -122,9 +122,15 @@ export async function registerPublicApi(app: FastifyInstance, deps: DraftDeps): 
     ).rows;
     return page(rows, limit, draftDto, 'drafts');
   });
-  app.post('/drafts', async (req, reply) =>
-    reply.code(201).send(await createDraft(deps, tenantOf(req), req.body)),
-  );
+  app.post('/drafts', async (req, reply) => {
+    const key = req.headers['idempotency-key'];
+    const count = req.raw.rawHeaders.filter(
+      (value, index) => index % 2 === 0 && value.toLowerCase() === 'idempotency-key',
+    ).length;
+    if (key !== undefined && (typeof key !== 'string' || count > 1 || !/^[A-Za-z0-9._:-]{1,128}$/.test(key)))
+      throw new OperatorError(400, 'invalid_request', 'Idempotency-Key must be one 1–128 character token using letters, digits, dot, underscore, colon or hyphen.');
+    return reply.code(201).send(await createDraft(deps, tenantOf(req), req.body, key as string | undefined));
+  });
   app.get('/drafts/:id', async (req) => {
     Empty.parse(req.query);
     const row = (

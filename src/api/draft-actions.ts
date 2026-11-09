@@ -1,4 +1,4 @@
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
 import type { Clock } from '../domain/clock';
 import type { IntegrationMode } from '../domain/types';
@@ -35,27 +35,49 @@ const EditDraft = z
   .strict();
 const Revision = z.object({ expectedRevision: z.number().int().positive() }).strict();
 
-export async function createDraft(deps: DraftDeps, tenant: string, body: unknown) {
-  const { db } = deps;
+/** Optional API-only key. UI and callers without a key retain ordinary create semantics. */
+export async function createDraft(deps: DraftDeps, tenant: string, body: unknown, idempotencyKey?: string) {
   const input = CreateDraft.parse(body);
-  if (
-    input.connectionId &&
-    !(
-      await db.query('SELECT 1 FROM social_connections WHERE id = $1 AND tenant_id = $2', [
-        input.connectionId,
-        tenant,
-      ])
-    ).rowCount
-  ) {
-    throw new OperatorError(404, 'account_not_found', 'Account not found.');
-  }
-  const row = (
-    await db.query(
+  const normalized = { name: input.name, content: input.content ?? {}, connectionId: input.connectionId ?? null };
+  const create = async (db: Pool | PoolClient) => {
+    if (
+      normalized.connectionId &&
+      !(await db.query('SELECT 1 FROM social_connections WHERE id = $1 AND tenant_id = $2', [
+        normalized.connectionId, tenant,
+      ])).rowCount
+    ) throw new OperatorError(404, 'account_not_found', 'Account not found.');
+    const row = (await db.query(
       'INSERT INTO automation_drafts (tenant_id, name, content, connection_id) VALUES ($1, $2, $3, $4) RETURNING *',
-      [tenant, input.name, input.content ?? {}, input.connectionId ?? null],
-    )
-  ).rows[0];
-  return { draft: draftDto(row) };
+      [tenant, normalized.name, normalized.content, normalized.connectionId],
+    )).rows[0];
+    return { draft: draftDto(row) };
+  };
+  if (idempotencyKey === undefined) return create(deps.db);
+  return withTx(deps.db, async (db) => {
+    // The unique workspace/key row serializes concurrent requests across processes and credentials.
+    const reserved = await db.query(
+      `INSERT INTO draft_create_requests (tenant_id, idempotency_key, input)
+       VALUES ($1, $2, $3) ON CONFLICT (tenant_id, idempotency_key) DO NOTHING RETURNING tenant_id`,
+      [tenant, idempotencyKey, normalized],
+    );
+    if (!reserved.rowCount) {
+      const existing = (await db.query(
+        `SELECT response, input = $3::jsonb AS matches FROM draft_create_requests
+         WHERE tenant_id = $1 AND idempotency_key = $2 FOR UPDATE`,
+        [tenant, idempotencyKey, normalized],
+      )).rows[0];
+      if (!existing.matches)
+        throw new OperatorError(409, 'idempotency_conflict', 'This idempotency key was used with different draft input.');
+      return existing.response;
+    }
+    // Persist the serialized creation response, not a pointer to a mutable draft.
+    const response = JSON.parse(JSON.stringify(await create(db)));
+    await db.query(
+      'UPDATE draft_create_requests SET response = $3 WHERE tenant_id = $1 AND idempotency_key = $2',
+      [tenant, idempotencyKey, response],
+    );
+    return response;
+  });
 }
 export async function editDraft(deps: DraftDeps, tenant: string, id: string, body: unknown) {
   const { db } = deps;

@@ -62,7 +62,22 @@ Drafts, rules, runs and leads page newest first. Pass `nextCursor` as `cursor` w
 
 For `409 revision_conflict`, fetch the draft, merge changes and retry with its current revision. Other publication conflicts can indicate account or dispatch readiness. Read the error body and account `issue`.
 
-Retry reads with bounded backoff. Confirm a write's effect before repeating it. Draft creation has no idempotency key, so check existing drafts after a lost response. Repeating a successful publish at the same revision returns the existing version.
+Retry reads with bounded backoff. For draft creation, send an optional `Idempotency-Key` to retry a lost response safely. Generate one key per intended draft and keep both the key and request body for retries. Use a write key. If the request times out, repeat the curl command with the same key and body.
+
+```sh
+export DRAFT_CREATE_KEY="$(node -e 'console.log(crypto.randomUUID())')"
+curl --fail-with-body -sS -X POST "$BLOTATO_API_URL/drafts" \
+  -H "Authorization: Bearer $BLOTATO_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $DRAFT_CREATE_KEY" \
+  --data '{"name":"Pricing replies"}'
+```
+
+Run that curl twice. Both calls return the same `201` response and draft ID, even if another editor has since changed the draft. Each workspace remembers its successful keys indefinitely, including after credential rotation. Each call still needs a valid write credential.
+
+Choose one case-sensitive token, 1–128 ASCII letters, digits or `._:-`. Reusing it with different input returns `409 idempotency_conflict`. Object field order doesn’t matter. Names and post IDs are trimmed, connection UUIDs are lowercased and missing content defaults to `{}`. Array order matters. A bad header or invalid body returns `400`. A failed create leaves the key available for a retry.
+
+Without this header, each successful create makes a new draft. This retry contract applies only to `POST /drafts`. Repeating a successful publish at the same revision returns the existing version. Confirm other writes' effects before repeating them.
 
 ## Verify the client
 

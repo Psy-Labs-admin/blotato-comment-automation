@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: ${REHEARSAL_DB_PASSWORD:?}
+      POSTGRES_DB: rehearsal
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "rehearsal"]
+      interval: 2s
+      timeout: 3s
+      retries: 45
+  api:
+    image: ${REHEARSAL_IMAGE:?}
+    pull_policy: never
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1::3000"
+    environment:
+      HOST: 0.0.0.0
+      DATABASE_URL: postgres://postgres:${REHEARSAL_DB_PASSWORD}@postgres:5432/rehearsal
+      BLOTATO_LOCAL_DIR: /tmp/workspace
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        node scripts/admin.cjs init 'Release rehearsal'
+        exec node --env-file=/tmp/workspace/operator/service.env dist/main.js
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 45
