@@ -8,5 +8,6 @@
 !scripts
 !scripts/build.cjs
 !scripts/admin.cjs
+!scripts/api-key.cjs
 !migrations
 !migrations/**

@@ -159,6 +159,21 @@ async function main() {
       assert.equal(overview[key], 0, key + ' starts empty');
     assert.equal(overview.readiness.accountConnected, false);
     assert.equal(overview.readiness.dispatchConfigured, false);
+    const cliEnv = { PATH: process.env.PATH, BLOTATO_LOCAL_DIR: directory };
+    const keys = (...args) => command(process.execPath, ['scripts/api-key.cjs', ...args], { env: cliEnv, capture: true });
+    const machineKey = await keys('create', 'Acceptance integration');
+    const keyList = JSON.parse(await keys('list'));
+    assert.equal(keyList.length, 1);
+    assert.equal(keyList[0].scope, 'read');
+    const clientEnv = { PATH: process.env.PATH, BLOTATO_API_URL: base + '/api/v1', BLOTATO_API_KEY: machineKey };
+    const probe = JSON.parse(await command(process.execPath, ['examples/external-admin.mjs'], { env: clientEnv, capture: true }));
+    assert.equal(probe.workspace.id, credentials.id);
+    assert.equal(probe.leadsOnFirstPage, 0);
+    const contract = await json('/openapi.json', { authenticated: false });
+    assert.equal(contract.openapi, '3.1.0');
+    assert.equal(contract.paths['/workspace'].get.operationId, 'getWorkspace');
+    for (const asset of ['/docs/', '/docs/assets/swagger-ui-bundle.js', '/docs/assets/swagger-ui.css', '/docs/assets/init.js'])
+      await request(asset, { authenticated: false });
     assert.deepEqual(await json('/operator/accounts'), { accounts: [] });
     assert.deepEqual(await json('/operator/automations'), { drafts: [], automations: [] });
     const operations = await json('/operator/operations');
@@ -188,6 +203,12 @@ async function main() {
     assert.equal(restored.draft.name, 'Acceptance draft');
     assert.equal(restored.draft.id, draft.id);
     assert.equal((await json('/operator/overview')).drafts, 1);
+    const readDrafts = () => fetch(base + '/api/v1/drafts', { headers: { authorization: 'Bearer ' + machineKey } });
+    const integrationDrafts = await readDrafts();
+    assert.equal(integrationDrafts.status, 200);
+    assert.equal((await integrationDrafts.json()).drafts[0].id, draft.id);
+    await keys('revoke', keyList[0].id);
+    assert.equal((await readDrafts()).status, 401);
     const restartedOperations = await json('/operator/operations');
     assert.equal(restartedOperations.notifications.configured, false);
     assert.equal(restartedOperations.notifications.lastAcceptedAt, null);

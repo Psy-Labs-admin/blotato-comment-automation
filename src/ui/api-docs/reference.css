@@ -1,0 +1,63 @@
+:root {
+  color-scheme: light;
+  background: #fff;
+  color: #10254a;
+  font-family: system-ui, sans-serif;
+}
+body {
+  margin: 0;
+}
+.api-header {
+  max-width: 1400px;
+  margin: auto;
+  padding: 20px clamp(16px, 4vw, 48px);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+  border-bottom: 1px solid #d5deeb;
+}
+.api-header a {
+  color: #123b70;
+}
+.api-header .api-brand {
+  color: #10254a;
+  font-size: 26px;
+  font-weight: 750;
+  letter-spacing: -0.06em;
+  text-decoration: none;
+}
+.api-header nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  font-size: 14px;
+}
+.api-instructions {
+  max-width: 1400px;
+  margin: 18px auto 0;
+  padding: 0 20px;
+  line-height: 1.6;
+  box-sizing: border-box;
+}
+.swagger-ui .info {
+  margin: 24px 0;
+}
+html[data-mode='reference'] .swagger-ui .auth-wrapper,
+html[data-mode='reference'] .swagger-ui .authorization__btn {
+  display: none;
+}
+@media (max-width: 540px) {
+  .api-header {
+    align-items: start;
+  }
+  .swagger-ui .opblock .opblock-summary {
+    flex-wrap: wrap;
+  }
+  .swagger-ui .opblock .opblock-summary-path {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+}
+
+html[data-mode='reference'] .swagger-ui .scheme-container { display: none; }

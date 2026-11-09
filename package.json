@@ -21,7 +21,9 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:load": "tsx tests/load/load-check.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "api:key": "node scripts/api-key.cjs",
+    "docs:build": "node scripts/build-reference.cjs"
   },
   "dependencies": {
     "@opentelemetry/api": "1.10.0",
@@ -36,15 +38,19 @@
     "fastify": "^5.12.8",
     "pg": "^8.23.1",
     "prom-client": "^15.1.3",
+    "swagger-ui-dist": "5.34.1",
     "zod": "4.6.7"
   },
   "devDependencies": {
     "@playwright/test": "1.65.0",
+    "@seriousme/openapi-schema-validator": "2.11.0",
     "@temporalio/nyc-test-coverage": "1.25.0",
     "@temporalio/testing": "^1.25.0",
     "@types/node": "^22.20.5",
     "@types/pg": "^8.23.1",
     "@vitest/coverage-v8": "4.1.12",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
     "istanbul-lib-coverage": "3.2.2",
     "istanbul-lib-report": "3.0.1",
     "istanbul-lib-source-maps": "5.0.6",
@@ -53,5 +59,8 @@
     "typescript": "^5.9.3",
     "v8-to-istanbul": "9.3.0",
     "vitest": "4.1.12"
+  },
+  "scarfSettings": {
+    "enabled": false
   }
 }

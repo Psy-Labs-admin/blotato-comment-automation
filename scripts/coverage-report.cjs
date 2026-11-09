@@ -12,6 +12,7 @@ const read = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 const uiAssets = new Map([
   ['/console.js', path.join(root, 'src/ui/console.js')],
   ['/session/enter.js', path.join(root, 'src/ui/enter.js')],
+  ['/docs/assets/init.js', path.join(root, 'src/ui/api-docs/init.js')],
 ]);
 const workflowDir = path.join(root, 'src/workflows') + path.sep;
 

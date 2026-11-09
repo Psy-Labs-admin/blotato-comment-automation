@@ -28,7 +28,17 @@ jobs:
       - name: Build deployable image
         run: docker build --tag blotato-workspace:checks .
       - name: Verify runtime assets
-        run: docker run --rm blotato-workspace:checks node -e "require('./dist/api/server'); require('node:fs').accessSync('dist/ui/index.html')"
+        run: >-
+          docker run --rm blotato-workspace:checks node -e
+          "require('./dist/api/server');
+          const fs=require('node:fs');
+          for(const f of ['dist/ui/index.html','dist/api/openapi.json','scripts/api-key.cjs']) fs.accessSync(f);
+          for(const a of require('./dist/api/documentation').documentationAssets) fs.accessSync(a.file)"
+      - name: Package the public API reference
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'Psy-Labs-admin/blotato-comment-automation'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: reports/reference-site
       - name: Upload coverage and acceptance results
         if: always()
         uses: actions/upload-artifact@v6
@@ -41,3 +51,21 @@ jobs:
             reports/tests.xml
             reports/browser.xml
             reports/acceptance/
+
+  publish-reference:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'Psy-Labs-admin/blotato-comment-automation'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.publish.outputs.page_url }}
+    concurrency:
+      group: public-api-reference
+      cancel-in-progress: false
+    steps:
+      - name: Publish the read-only Swagger reference
+        id: publish
+        uses: actions/deploy-pages@v5

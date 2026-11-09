@@ -1,0 +1,1690 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Blotato Automation API",
+    "version": "1.0.0",
+    "description": "Manage workspace rules and read conversation results from your backend. Use a named integration key. Writes require write scope. Each operation is limited to the workspace that issued the key."
+  },
+  "servers": [
+    {
+      "url": "/api/v1",
+      "description": "Same-origin versioned public API"
+    }
+  ],
+  "security": [
+    {
+      "IntegrationKey": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Workspace",
+      "description": "Authenticated workspace identity."
+    },
+    {
+      "name": "Accounts",
+      "description": "Connected Instagram account readiness."
+    },
+    {
+      "name": "Drafts",
+      "description": "Revision-controlled editing and publication."
+    },
+    {
+      "name": "Automations",
+      "description": "Published automation definitions and activation."
+    },
+    {
+      "name": "Runs",
+      "description": "Execution records and factual timelines."
+    },
+    {
+      "name": "Leads",
+      "description": "Captured leads and CRM state."
+    }
+  ],
+  "paths": {
+    "/workspace": {
+      "get": {
+        "operationId": "getWorkspace",
+        "tags": [
+          "Workspace"
+        ],
+        "summary": "Get the authenticated workspace",
+        "x-required-permission": "read",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workspace"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        }
+      }
+    },
+    "/accounts": {
+      "get": {
+        "operationId": "listAccounts",
+        "tags": [
+          "Accounts"
+        ],
+        "summary": "List connected Instagram accounts",
+        "description": "Lists real accounts in the authenticated workspace, including disconnected accounts and publication readiness.",
+        "x-required-permission": "read",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          }
+        }
+      }
+    },
+    "/drafts": {
+      "get": {
+        "operationId": "listDrafts",
+        "tags": [
+          "Drafts"
+        ],
+        "summary": "List automation drafts",
+        "x-required-permission": "read",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DraftsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
+        ]
+      },
+      "post": {
+        "operationId": "createDraft",
+        "tags": [
+          "Drafts"
+        ],
+        "summary": "Create an automation draft",
+        "description": "Saves a new draft at revision 1. Omitted content defaults to an empty object. Repeating this request can create another draft. If the response is lost, check the draft list before trying again.",
+        "x-required-permission": "write",
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DraftResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDraft"
+              },
+              "example": {
+                "name": "Comment to email follow-up",
+                "content": {
+                  "keyword": "guide",
+                  "publicReply": "I will send the details in a message.",
+                  "emailPrompt": "What email should receive the guide?",
+                  "linkText": "Here is the guide.",
+                  "linkUrl": "https://example.com/guide",
+                  "timeoutHours": 72,
+                  "maxClarifications": 1,
+                  "clarificationText": "Please reply with an email address."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/drafts/{id}": {
+      "get": {
+        "operationId": "getDraft",
+        "tags": [
+          "Drafts"
+        ],
+        "summary": "Get an automation draft",
+        "x-required-permission": "read",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DraftResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "updateDraft",
+        "tags": [
+          "Drafts"
+        ],
+        "summary": "Update an automation draft",
+        "description": "Supply the current expectedRevision. Each successful update advances the revision. Omitted fields keep their values. Supplying content replaces that entire object. Set connectionId to null to clear the account. After a lost response or a 409 revision_conflict, fetch the draft before retrying.",
+        "x-required-permission": "write",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DraftResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateDraft"
+              },
+              "example": {
+                "expectedRevision": 1,
+                "content": {
+                  "keyword": "guide",
+                  "publicReply": "I will send the details in a message.",
+                  "emailPrompt": "What email should receive the guide?",
+                  "linkText": "Here is the guide.",
+                  "linkUrl": "https://example.com/guide",
+                  "timeoutHours": 72,
+                  "maxClarifications": 1,
+                  "clarificationText": "Please reply with an email address."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/drafts/{id}/publish": {
+      "post": {
+        "operationId": "publishDraft",
+        "tags": [
+          "Drafts"
+        ],
+        "summary": "Publish a draft revision",
+        "description": "Validates complete content and account readiness, creates an immutable version, and activates the automation. Repeating the same expectedRevision after successful publication returns the existing version without creating another version or re-enabling a subsequently disabled automation. Editing the draft makes an older expectedRevision conflict. After an uncertain response, GET the draft and retry only the intended revision.",
+        "x-required-permission": "write",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExpectedRevision"
+              },
+              "example": {
+                "expectedRevision": 2
+              }
+            }
+          }
+        }
+      }
+    },
+    "/automations": {
+      "get": {
+        "operationId": "listAutomations",
+        "tags": [
+          "Automations"
+        ],
+        "summary": "List published automations",
+        "description": "Lists automations with an active published version, including disabled automations.",
+        "x-required-permission": "read",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
+        ]
+      }
+    },
+    "/automations/{id}": {
+      "get": {
+        "operationId": "getAutomation",
+        "tags": [
+          "Automations"
+        ],
+        "summary": "Get a published automation",
+        "x-required-permission": "read",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ]
+      }
+    },
+    "/automations/{id}/enable": {
+      "post": {
+        "operationId": "enableAutomation",
+        "tags": [
+          "Automations"
+        ],
+        "summary": "Enable a published automation",
+        "description": "Rechecks account readiness before enabling. Repeating this action sets the same status and is safe to retry.",
+        "x-required-permission": "write",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyRequest"
+              },
+              "example": {}
+            }
+          }
+        }
+      }
+    },
+    "/automations/{id}/disable": {
+      "post": {
+        "operationId": "disableAutomation",
+        "tags": [
+          "Automations"
+        ],
+        "summary": "Disable a published automation",
+        "description": "Prevents new runs from starting. Existing runs may continue sending under their pinned rule version. Repeating the action sets the same status.",
+        "x-required-permission": "write",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutomationStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmptyRequest"
+              },
+              "example": {}
+            }
+          }
+        }
+      }
+    },
+    "/runs": {
+      "get": {
+        "operationId": "listRuns",
+        "tags": [
+          "Runs"
+        ],
+        "summary": "List automation runs",
+        "description": "Read recorded execution states. needsReview=true selects runs with unresolved unknown send outcomes; false selects runs without them. Omit it to return both.",
+        "x-required-permission": "read",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/RunStatus"
+            }
+          },
+          {
+            "name": "needsReview",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "description": "true selects runs with unresolved unknown sends; false selects runs without unknown sends. Omit to return both."
+          }
+        ]
+      }
+    },
+    "/runs/{id}": {
+      "get": {
+        "operationId": "getRun",
+        "tags": [
+          "Runs"
+        ],
+        "summary": "Get an automation run",
+        "x-required-permission": "read",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ]
+      }
+    },
+    "/runs/{id}/timeline": {
+      "get": {
+        "operationId": "getRunTimeline",
+        "tags": [
+          "Runs"
+        ],
+        "summary": "Get the recorded run timeline",
+        "description": "Chronological recorded facts. Accepted by Instagram does not mean delivered. Unknown send outcomes are held without automatic resend.",
+        "x-required-permission": "read",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimelineResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ]
+      }
+    },
+    "/leads": {
+      "get": {
+        "operationId": "listLeads",
+        "tags": [
+          "Leads"
+        ],
+        "summary": "List captured leads",
+        "description": "Lists captured email leads and their CRM synchronization state. Email ownership has not been verified.",
+        "x-required-permission": "read",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeadsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "500": {
+            "$ref": "#/components/responses/500"
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          }
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "IntegrationKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "Integration API key",
+        "description": "Enter the key value only. The client sends it in the `Authorization: Bearer` header. Read keys can retrieve leads, including their email addresses. Write keys also authorize rule changes."
+      }
+    },
+    "parameters": {
+      "Id": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "Workspace-scoped resource UUID.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "description": "Maximum page size.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 25
+        }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "description": "Use nextCursor from the previous page. UUID of the last returned resource, resolved within this workspace. Unknown or foreign-workspace cursors return 400. Pages use createdAt descending, then id descending. Null nextCursor means no further page.",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "responses": {
+      "400": {
+        "description": "Invalid input, unsupported query parameter, invalid cursor, or incomplete automation definition.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "401": {
+        "description": "Missing, invalid, or revoked integration bearer key.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "headers": {
+          "WWW-Authenticate": {
+            "description": "Bearer authentication challenge.",
+            "schema": {
+              "type": "string",
+              "const": "Bearer"
+            }
+          }
+        }
+      },
+      "403": {
+        "description": "A write key is required for mutations. If an X-Tenant-Id header is supplied, it must match the workspace bound to the key; a contradictory value returns TENANT_MISMATCH.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "examples": {
+              "scope": {
+                "value": {
+                  "error": "This operation requires a write API key.",
+                  "code": "INSUFFICIENT_SCOPE"
+                }
+              },
+              "tenant": {
+                "value": {
+                  "error": "The tenant header conflicts with the API key.",
+                  "code": "TENANT_MISMATCH"
+                }
+              }
+            }
+          }
+        }
+      },
+      "404": {
+        "description": "Resource not found in the authenticated workspace.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "409": {
+        "description": "State conflict. Inspect code, refresh the resource, and resolve the stated reason before retrying.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "examples": {
+              "revision_conflict": {
+                "value": {
+                  "error": "This automation changed. Reload before publishing.",
+                  "code": "revision_conflict"
+                }
+              },
+              "account_required": {
+                "value": {
+                  "error": "Choose a connected Instagram account before publishing.",
+                  "code": "account_required"
+                }
+              },
+              "reconnect_required": {
+                "value": {
+                  "error": "Connect or reconnect this Instagram account before publishing.",
+                  "code": "reconnect_required"
+                }
+              },
+              "paused": {
+                "value": {
+                  "error": "Resume this account before publishing.",
+                  "code": "paused"
+                }
+              },
+              "permissions_required": {
+                "value": {
+                  "error": "The account integration must confirm messaging permissions and limits.",
+                  "code": "permissions_required"
+                }
+              },
+              "delivery_unconfigured": {
+                "value": {
+                  "error": "Configure message delivery before publishing.",
+                  "code": "delivery_unconfigured"
+                }
+              },
+              "integration_mismatch": {
+                "value": {
+                  "error": "Reconnect this account through the configured Instagram integration.",
+                  "code": "integration_mismatch"
+                }
+              }
+            }
+          }
+        }
+      },
+      "500": {
+        "description": "An unexpected server error occurred.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "Workspace": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "Account": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "accountId": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "native",
+                  "gateway"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "canDisconnect": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "disconnected",
+              "unauthorized"
+            ]
+          },
+          "verifiedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "canPublish": {
+            "type": "boolean"
+          },
+          "issue": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "reconnect_required",
+                  "integration_mismatch",
+                  "paused",
+                  "permissions_required",
+                  "delivery_unconfigured"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "accountId",
+          "displayName",
+          "source",
+          "canDisconnect",
+          "status",
+          "verifiedAt",
+          "paused",
+          "canPublish",
+          "issue"
+        ],
+        "additionalProperties": false
+      },
+      "DraftContent": {
+        "type": "object",
+        "properties": {
+          "keyword": {
+            "type": "string",
+            "maxLength": 60
+          },
+          "publicReply": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "emailPrompt": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "linkText": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "linkUrl": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "timeoutHours": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 720
+          },
+          "clarificationText": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "maxClarifications": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "postIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "maxItems": 1000
+          }
+        },
+        "required": [],
+        "additionalProperties": false,
+        "description": "Partial editor content may be saved. Publishing validates the complete content: a matchable keyword, nonempty reply and prompt, an HTTP(S) link without credentials, and clarification text when maxClarifications is nonzero. Empty or omitted postIds targets all supported posts. Defaults at publication: timeoutHours=72 and maxClarifications=1."
+      },
+      "Draft": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "content": {
+            "$ref": "#/components/schemas/DraftContent"
+          },
+          "connectionId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "automationId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "publishedRevision": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "publishedVersionId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "paused",
+              "published"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "content",
+          "connectionId",
+          "automationId",
+          "revision",
+          "publishedRevision",
+          "publishedVersionId",
+          "updatedAt",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "CreateDraft": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Trimmed before validation and storage."
+          },
+          "content": {
+            "$ref": "#/components/schemas/DraftContent"
+          },
+          "connectionId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "UpdateDraft": {
+        "type": "object",
+        "properties": {
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Trimmed before validation and storage."
+          },
+          "content": {
+            "$ref": "#/components/schemas/DraftContent"
+          },
+          "connectionId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "expectedRevision"
+        ],
+        "additionalProperties": false
+      },
+      "ExpectedRevision": {
+        "type": "object",
+        "properties": {
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "expectedRevision"
+        ],
+        "additionalProperties": false
+      },
+      "RunStatus": {
+        "type": "string",
+        "enum": [
+          "starting",
+          "running",
+          "waiting_input",
+          "blocked_unknown",
+          "completed",
+          "expired",
+          "cancelled",
+          "failed"
+        ]
+      },
+      "Lead": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "email": {
+            "type": "string",
+            "description": "Format-valid email captured from a participant; ownership is not verified."
+          },
+          "runId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "conversationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "crmStatus": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "synced",
+              "failed"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "runId",
+          "conversationId",
+          "createdAt",
+          "crmStatus"
+        ],
+        "additionalProperties": false
+      },
+      "TimelineEntry": {
+        "type": "object",
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "type": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "refs": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "at",
+          "type",
+          "text",
+          "refs"
+        ],
+        "additionalProperties": false
+      },
+      "Automation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "connectionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "disabled"
+            ]
+          },
+          "versionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "connectionId",
+          "status",
+          "versionId",
+          "version"
+        ]
+      },
+      "Run": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "automationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunStatus"
+          },
+          "statusReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "currentStep": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "finishedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "conversationId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "id",
+          "automationId",
+          "status",
+          "statusReason",
+          "currentStep",
+          "createdAt",
+          "finishedAt",
+          "conversationId"
+        ],
+        "additionalProperties": false
+      },
+      "DraftResponse": {
+        "type": "object",
+        "properties": {
+          "draft": {
+            "$ref": "#/components/schemas/Draft"
+          }
+        },
+        "required": [
+          "draft"
+        ],
+        "additionalProperties": false
+      },
+      "PublishResponse": {
+        "type": "object",
+        "properties": {
+          "draft": {
+            "$ref": "#/components/schemas/Draft"
+          },
+          "automationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "versionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "draft",
+          "automationId",
+          "versionId",
+          "version"
+        ],
+        "additionalProperties": false
+      },
+      "AccountsResponse": {
+        "type": "object",
+        "properties": {
+          "accounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Account"
+            }
+          }
+        },
+        "required": [
+          "accounts"
+        ],
+        "additionalProperties": false
+      },
+      "DraftsResponse": {
+        "type": "object",
+        "properties": {
+          "drafts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Draft"
+            }
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "drafts",
+          "nextCursor"
+        ],
+        "additionalProperties": false
+      },
+      "AutomationsResponse": {
+        "type": "object",
+        "properties": {
+          "automations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Automation"
+            }
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "automations",
+          "nextCursor"
+        ],
+        "additionalProperties": false
+      },
+      "RunsResponse": {
+        "type": "object",
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Run"
+            }
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "runs",
+          "nextCursor"
+        ],
+        "additionalProperties": false
+      },
+      "LeadsResponse": {
+        "type": "object",
+        "properties": {
+          "leads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Lead"
+            }
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "leads",
+          "nextCursor"
+        ],
+        "additionalProperties": false
+      },
+      "AutomationResponse": {
+        "type": "object",
+        "properties": {
+          "automation": {
+            "$ref": "#/components/schemas/Automation"
+          }
+        },
+        "required": [
+          "automation"
+        ],
+        "additionalProperties": false
+      },
+      "RunResponse": {
+        "type": "object",
+        "properties": {
+          "run": {
+            "$ref": "#/components/schemas/Run"
+          }
+        },
+        "required": [
+          "run"
+        ],
+        "additionalProperties": false
+      },
+      "TimelineResponse": {
+        "type": "object",
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimelineEntry"
+            }
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "additionalProperties": false
+      },
+      "AutomationStatusResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "disabled"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "EmptyRequest": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  }
+}

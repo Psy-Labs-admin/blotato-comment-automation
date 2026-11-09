@@ -41,6 +41,9 @@ export function registerSessions(app: FastifyInstance, db: Pool, access: ApiAcce
   }
 
   app.addHook('onRequest', async (req, reply) => {
+    // Machine clients always authenticate in the v1 plugin. Documentation is public.
+    const route = req.routeOptions.url;
+    if (route?.startsWith('/api/v1/') || route === '/docs' || route?.startsWith('/docs/') || route === '/openapi.json') return;
     const bearer = req.headers.authorization;
     if (bearer) {
       const principal = authorizedDigest(bearerDigest(bearer));

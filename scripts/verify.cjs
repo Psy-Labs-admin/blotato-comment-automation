@@ -58,6 +58,7 @@ async function main() {
   await step('Install locked dependencies', installDependencies);
   await step('Type-check', () => npm(['run', 'typecheck']));
   await step('Build the release', () => npm(['run', 'build']));
+  await step('Build the public Swagger reference', () => npm(['run', 'docs:build']));
   const playwright = path.join(root, 'node_modules/@playwright/test/cli.js');
   await step('Install Chromium', () =>
     command(process.execPath, [

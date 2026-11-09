@@ -29,7 +29,7 @@ async function captureBrowserCoverage(page: Page, title: string) {
   const scripts = (await page.coverage.stopJSCoverage())
     .filter((entry) => {
       try {
-        return ["/console.js", "/session/enter.js"].includes(
+        return ["/console.js", "/session/enter.js", "/docs/assets/init.js"].includes(
           new URL(entry.url).pathname,
         );
       } catch {

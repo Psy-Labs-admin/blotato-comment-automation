@@ -15,6 +15,7 @@ COPY --from=build /app/dist ./dist
 COPY package.json ./
 COPY migrations ./migrations
 COPY scripts/admin.cjs ./scripts/admin.cjs
+COPY scripts/api-key.cjs ./scripts/api-key.cjs
 USER node
 EXPOSE 3000
 CMD ["node", "dist/main.js"]

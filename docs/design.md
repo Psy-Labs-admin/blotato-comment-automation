@@ -3,13 +3,7 @@
 > When someone comments "pricing" on any Instagram post: reply "Sent you a DM!", DM them asking for
 > their email, wait for the answer, then DM them a link.
 
-This document describes the backend that runs that automation, and automations like it. Behaviour
-described here is implemented in this repository unless [§15](#15-limitations-and-next-steps) lists
-it as not implemented. Where a statement is backed by an automated test, the README's guarantee
-table links to that test. The design went through an independent review; the findings and their
-fixes are summarised in [AI_USAGE.md](../AI_USAGE.md).
-
----
+This design follows one comment through ingestion, rule selection, a durable wait and delivery of the link. The [capability map](capabilities.md) connects workflows to implementation and tests. See [current limitations](#15-limitations-and-next-steps) for deployment-dependent behavior, the [integration guide](integration.md) for external clients and the [verification guide](testing.md) to reproduce the failure scenarios.
 
 ## 1. The promise
 
@@ -17,8 +11,10 @@ What the system guarantees, in the order a customer would care:
 
 1. **Every accepted comment has an explainable outcome.** A run started, or a recorded reason why not
    (no match, lower priority, conversation busy, cooldown, opted out, account inactive…).
-2. **The person receives what was promised, once.** Duplicate webhooks, retries, worker crashes and
-   restarts never produce a second public reply or DM.
+2. **Retries preserve one logical send.** Duplicate webhooks and activity re-entry reuse the durable
+   ledger. Ambiguous external outcomes stop automatic sending rather than risk a second message.
+   Instagram has no end-to-end exactly-once delivery contract; an operator-authorized retry can
+   duplicate a message if the original actually arrived.
 3. **When we do not know whether a message was delivered, we say so.** The send becomes `unknown`.
    The conversation is held, nothing is resent blindly, an operator is alerted, and the timeline
    shows exactly where it stopped.
@@ -27,7 +23,8 @@ What the system guarantees, in the order a customer would care:
    moves. Every run reaches a recorded end state: nothing stays "running" forever because its driver
    disappeared.
 5. **Integrations are not on the critical path.** A CRM outage does not stop the person from getting
-   the link. The lead syncs once the CRM is back, exactly once per idempotency key.
+   the link. The lead remains queued for delivery; the CRM must honor the idempotency key to
+   deduplicate repeated requests. Exhausted deliveries require operator recovery.
 
 What it explicitly does **not** promise: exactly-once *delivery* to Instagram. No such contract
 exists between our database and Meta's API (see [§7](#7-external-sends-the-ledger-protocol)).
@@ -111,13 +108,14 @@ conversation. Business-definition version and worker-code version are different 
 
 ```mermaid
 flowchart LR
-    IG[Existing Instagram integration<br/>webhooks + send API] -->|normalised events| API
+    IG[Instagram Graph API / optional gateway] -->|signed native callbacks / signed normalized events| API
     subgraph App[One codebase, three roles]
       API[API role<br/>Fastify: webhooks, management,<br/>timeline, funnel, metrics]
       RELAY[Relay role<br/>outbox → Temporal / CRM / alerts<br/>+ inbox sweeper]
       WORKER[Worker role<br/>Temporal workflows + activities]
     end
-    API -->|ingest + route, one tx each| PG[(PostgreSQL<br/>facts & invariants)]
+    API -->|durable ingest; gateway also tries routing before ACK| PG
+    RELAY -->|route pending native / recovered events| PG[(PostgreSQL<br/>facts & invariants)]
     RELAY <-->|claim rows SKIP LOCKED| PG
     RELAY -->|start / signal| T[Temporal<br/>ordering & time]
     T <--> WORKER
@@ -155,7 +153,7 @@ Usernames are never identifiers. Schema: [`migrations/001_init.sql`](../migratio
 
 | Table | Purpose | Key constraints |
 |---|---|---|
-| `tenants`, `social_connections` | Customer and their already-connected account (token stays in the existing integration). `capabilities` is the versioned adapter contract (windows, budgets, reconciliation support). `sends_paused` is the account kill switch. | `unique(platform, external_account_id)` |
+| `tenants`, `social_connections` | Customer and connected account. Gateway credentials stay upstream; native access tokens are encrypted in `instagram_credentials`. `capabilities` is the versioned adapter contract (windows, budgets, reconciliation support). `sends_paused` is the account kill switch. | `unique(platform, external_account_id)` |
 | `automations`, `automation_versions` | Trigger config, priority, cooldown; immutable published definitions. | `unique(automation_id, version)` |
 | `conversations` | One row per (account, participant). **Its row lock serialises everything in a conversation.** `owner_run_id` = the single active run. `last_inbound_seq`, `last_inbound_dm_at`, `opted_out`, `human_takeover`. | `unique(connection_id, participant_id)` |
 | `inbox_events` | Every accepted event: dedup key, per-conversation `seq`, our `received_at`, minimal payload, `routing_outcome`. | `unique(connection_id, event_type, provider_event_key)`, `unique(conversation_id, seq)` |
@@ -169,6 +167,9 @@ Usernames are never identifiers. Schema: [`migrations/001_init.sql`](../migratio
 | `outbox` | Commands to Temporal and business events to CRM/alerts, written in the same tx as the change that needs them. | `unique(idempotency_key)` |
 | `leads` | Captured email (`format_valid_unverified`), provenance, CRM status. | `unique(run_id)` |
 | `incidents` | Grouped operational incidents (what goes to Telegram). | partial unique open `(tenant, connection, class)` |
+| `integration_keys` | Named machine credentials for `/api/v1`, separate from operator sessions and metrics. Store SHA-256 digest, `read`/`write` scope and revocation time; authenticate against PostgreSQL on every request. | unique `token_hash`; tenant FK |
+| `automation_drafts` | Editable content with optimistic revision checks; publishing creates an immutable executable version. | tenant-scoped account/automation references |
+| `instagram_credentials` | Encrypted native credentials, grant details and credential generation used to fence refresh/reconnect races. | one credential per connection |
 | `run_audit_events` | Append-only decision log: the timeline. References and reason codes, never message bodies or emails. | — |
 
 **Invariants and what enforces them:**
@@ -191,15 +192,18 @@ Usernames are never identifiers. Schema: [`migrations/001_init.sql`](../migratio
 sequenceDiagram
     autonumber
     participant IG as Instagram integration
-    participant API as API (ingest/route)
+    participant API as API (durable ingest)
     participant PG as Postgres
     participant R as Relay
     participant T as Temporal workflow
     participant A as Activities
     IG->>API: comment.created
     API->>PG: tx: lock conversation, insert inbox (dedup, seq)
-    API-->>IG: 202 (only after commit)
-    API->>PG: tx: match rule, claim conversation, create run + outbox(start)
+    opt Gateway callback: inline routing attempt
+      API->>PG: tx: match rule, claim conversation, create run + outbox(start)
+    end
+    API-->>IG: ACK after ingest commit (gateway 202; native 200)
+    R->>PG: route pending events idempotently (native / recovery)
     R->>PG: claim outbox row (SKIP LOCKED)
     R->>T: start(workflowId = comment-automation-<runId>)
     T->>A: executeSend(public_reply)
@@ -211,7 +215,9 @@ sequenceDiagram
     T->>A: activateWait, evaluateWait → waiting(ms)
     T->>T: condition(inboxDirty, until deadline)
     IG->>API: message.received "me@x.com"
-    API->>PG: insert inbox (seq > boundary) + outbox(signal inboxChanged)
+    API->>PG: insert inbox (seq > boundary)
+    Note over API,R: gateway tries routing inline; native waits for sweep
+    R->>PG: route pending DM / persist outbox(signal inboxChanged)
     R->>T: signal inboxChanged
     T->>A: evaluateWait
     A->>PG: tx: consume event, create lead, outbox(crm.lead_captured)
@@ -232,8 +238,12 @@ lock and recorded on the inbox row. Comments: match active automations on the *c
 version, pick the winner, check suppressions, then create the run + `run_controls` + set
 `owner_run_id` + outbox `workflow.start`, all in one tx. DMs: if the owner run has a wait whose
 boundary is set and `seq > boundary`, enqueue a `workflow.signal inboxChanged`. Otherwise record
-`no_active_run` / `no_active_wait` / `before_prompt`. Routing runs inline after the ack for latency.
-A sweeper (`routePending`, every 2s) routes anything a crash left behind.
+`no_active_run` / `no_active_wait` / `before_prompt`. In gateway mode, a newly accepted event gets an inline routing attempt **before** HTTP 202 is
+returned. Routing failure is logged and does not undo durable acceptance. Native callbacks verify
+Meta signatures, normalize supported events and commit their inbox records before HTTP 200; they
+do not call the router inline. The relay sweeper (`routePending`, every 2s) routes native events and
+anything either path left unrouted. A crash after the ingest commit can therefore be recovered
+without a second run, whether the sender received its ACK or retries the callback.
 
 **6.3 Outbox relay** (`src/relay/relay.ts`). Claims ready rows with `FOR UPDATE SKIP LOCKED` and a
 lease in a short transaction, calls the handler **after commit** (no lock across the network), then
@@ -246,8 +256,9 @@ marks the row done or schedules a retry with jittered exponential backoff (dead-
 - `workflow.signal` to a workflow that has not started yet is retried later, never dropped. A signal
   to a finished run is dropped (nothing left to wake).
 - Temporal commands are **never dead-lettered**: a Temporal outage only delays them (visible as
-  `outbox_oldest_pending_seconds`). CRM and alert rows dead-letter after their retry budget and raise
-  an incident.
+  `outbox_oldest_pending_seconds`). CRM and metadata rows dead-letter after their retry budget and raise an incident.
+  Notification rows also stop after their delivery budget or permanent rejection; their receipts
+  remain inspectable without recursively opening another notification incident.
 
 **6.4 The workflow** (`src/workflows/commentAutomation.ts`) walks the steps. Before a send that
 prompts an `await_input`, it calls `prepareWait`. After the prompt is accepted, it calls
@@ -387,7 +398,8 @@ is still inferred, and the design says so.
 
 - **One lock per conversation**, always taken first (`SELECT … FOR UPDATE` on `conversations`), by
   ingest, routing, send reservation, wait evaluation and finalisation. A consistent lock order
-  (conversation → intent → incident) avoids deadlocks. Different conversations never contend.
+  (conversation → intent → incident) avoids deadlocks. Conversation locks isolate unrelated
+  participants; shared account budgets and tenant-wide incident/recovery updates can still contend.
 - **No lock is held across the network**: send reservation and outbox claim commit before I/O.
 - **Unique constraints back every "at most once"** (I1–I8), so even a logic bug produces a constraint
   violation instead of a duplicate.
@@ -419,10 +431,10 @@ triggers are suppressed (`connection_inactive`); conversations in progress wait 
 
 **Assumptions to verify before production** (Meta pages for private replies were not reachable
 during research, so these are configuration in `capabilities`, not claims): exact private-reply
-window (default 7 days), messaging window (24h), webhook fields per login route, rate limits per app
+window and messaging window, webhook fields per login route, rate limits per app
 and per account, whether any idempotency/lookup exists. Capabilities are read strictly: a limit
-the account's contract does not state blocks the sends that depend on it. Defaults are written once,
-explicitly, when a connection is created. Rotating accounts, proxies or masking activity are
+the account's contract does not state blocks the sends that depend on it. Native setup requires explicit, validated capability values; a gateway supplies its versioned
+account contract. These values must match the app’s actual approved use case. Rotating accounts, proxies or masking activity are
 explicitly not part of the design.
 
 ## 11. Failure modes
@@ -430,7 +442,7 @@ explicitly not part of the design.
 | Failure | Automatic behaviour | Human needed when |
 |---|---|---|
 | Duplicate / reordered webhooks | dedup + per-conversation seq | never |
-| API crash after ack, before routing | sweeper routes the stored event | never |
+| API crash after durable ingest, before routing (or native ACK before sweep) | sweeper routes the stored event; sender retries still deduplicate | never |
 | Relay down | commands wait in the outbox; delivered on restart | backlog age alert |
 | Temporal / worker down | ingest keeps working; Temporal commands wait in the outbox (never dead-lettered); runs resume; deadlines unchanged | prolonged outage |
 | Postgres unavailable for minutes | activities retry with backoff; after ~15–20 min the run is finalized `failed: activity_failed` (the finalizer waits for the DB) | if it happens |
@@ -472,11 +484,15 @@ explicitly not part of the design.
   `intents_unknown` and its oldest age, `outbox_dead_rows`, `runs_by_status`, `incidents_open`, plus
   `webhooks_received_total{type,result}`. No run/user ids in labels; those live in the timeline and logs.
 - **Alerts** (`src/alerts/*`): incidents grouped per (tenant, account, class), notified on open, at
-  most every 15 minutes while open, and on resolve. Each one says what broke, how many conversations,
+  most one update per 15-minute throttle window when occurrences are recorded, and on resolve. Each one says what broke, how many conversations,
   since when, what was done automatically and what a person must do. It goes to Telegram when
-  `TELEGRAM_BOT_TOKEN` is set, otherwise to a webhook sink. **No message bodies, emails or participant
+  `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are configured, or to the separately configured webhook sink. With neither destination configured, notifications remain pending. Telegram receipt handling and its external uncertainty are described in [Telegram notifications](telegram.md). **No message bodies, emails or participant
   ids in alerts or logs.** Activities return ids, not lead emails, so captured addresses stay out of Temporal
   history except where a step needs it.
+
+The shipped [Prometheus rules](../deploy/monitoring/alerts.yml) cover API availability, required
+role health, configured delivery queues, routing lag and uncertain sends. Exact thresholds and
+recovery steps are in the [operations runbook](operations.md#signals-to-watch).
 
 ## 13. Change management
 
@@ -497,8 +513,8 @@ explicitly not part of the design.
 
 Illustrative profile (an assumption, not Blotato data): 100k inbound events/day, bursts of 100/s.
 
-- Ingest is one short transaction per event, contending only per conversation. 100/s is far from
-  Postgres limits. A viral post spreads across many conversations, not one row.
+- Ingest is one short transaction per event, contending only per conversation. A viral post spreads across many conversations, not one row. Validate the target rate against
+  measured database and infrastructure capacity; this planning profile is not a benchmark result.
 - Concurrent waits ≈ new conversations/day × average wait duration. Waiting workflows cost Temporal
   storage, not worker CPU.
 - **History size.** At durable checkpoints the worker can continue with a fresh Temporal history. The continuation carries the current step, wait IDs, unresolved send and deferral budget. The same logical run, send ledger and absolute deadline stay in PostgreSQL. The replay and rollover suites exercise old histories, pending sends and email arriving during recovery.
@@ -513,8 +529,8 @@ Illustrative profile (an assumption, not Blotato data): 100k inbound events/day,
 
 Implemented and tested here: everything in §§2–13 except as listed below.
 
-- **Instagram**: the native adapter uses Instagram Login and the versioned Graph API. Webhooks are verified before normalization. An authenticated upstream integration remains an optional deployment mode. See [Instagram setup](instagram.md).
-- **Operator authentication**: bearer tokens and browser sessions are bound to a tenant. The production identity provider and credential rotation belong to the host product.
+- **Instagram**: the native adapter uses Instagram Login and the versioned Graph API. Facebook Login for Business / Meta Unified Login configuration IDs are not consumed by this implementation. Contract tests use isolated providers; live end-to-end approval requires a real authorized account and stable public HTTPS deployment. Webhooks are verified before normalization. An authenticated upstream integration remains an optional deployment mode. See [Instagram setup](instagram.md).
+- **Access boundaries**: operator bearer credentials and CSRF-protected browser sessions are tenant-bound. Machine clients use independently issued, named `blt_` credentials for `/api/v1`, with `read`/`write` scopes and database-backed revocation; neither operator tokens nor cookies authenticate that API. Metrics and both webhook signatures use separate credentials. See [API access](operations.md#api-access). The production identity provider belongs to the host product.
 - **Webhook authenticity**: the native endpoint verifies Meta’s signature over the raw body. The optional normalized endpoint accepts a separate timestamped HMAC from the trusted integration.
 - **Retention and storage**: opt-in inbox redaction preserves active waits and unresolved sends. The operator must provision encrypted storage for application data and backups. Lead deletion and backup retention remain deployment policies.
 - **Tracing**: opt-in OTLP traces cover HTTP, routing, activities and relay delivery. Audit identifiers provide the lookup path for an individual conversation. See [observability](observability.md).

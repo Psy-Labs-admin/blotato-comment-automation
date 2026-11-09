@@ -24,6 +24,8 @@ import { registerOperator } from './operator';
 import { OperatorError } from '../storage/drafts';
 import { bearerDigest, validWebhook, type ApiAccess } from './access';
 import { registerConsole } from '../ui';
+import { registerDocumentation } from './documentation';
+import { registerPublicApi } from './v1';
 import { buildConversationTimeline, buildTimeline } from '../timeline';
 
 export interface ServerDeps {
@@ -85,6 +87,8 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   const {tenantOf, csrfFor, sessionBinding} = registerSessions(app, db, deps.access, deps.consoleOrigin);
   const dispatchConfigured = deps.dispatchConfigured ?? false;
   const integrationMode = deps.integrationMode ?? (deps.nativeInstagram ? 'native' : 'unconfigured');
+  app.register(registerPublicApi, { prefix: '/api/v1', db, clock, dispatchConfigured, integrationMode });
+  registerDocumentation(app);
   registerOperations(app, { ...operations, db, onOutbox: deps.onOutbox }, tenantOf);
   registerOperator(app, {...deps, integrationMode, dispatchConfigured}, tenantOf);
   registerInstagramLogin(app, {db, clock, config:deps.nativeInstagram, tenantOf, sessionIdentity:sessionBinding, credentialActive:(digest, tenant) => deps.access.tenants.get(digest) === tenant});
