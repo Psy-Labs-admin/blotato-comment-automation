@@ -1,6 +1,6 @@
 # Instagram comment automations
 
-Someone comments “pricing” on a post. The account replies in public, asks for an email in private, then sends the link in an Instagram DM. The interesting bit is what happens if the worker crashes between “send” and “sent”.
+Someone comments “pricing.” The account replies to the comment, asks for an email in private, then DMs the link. What if they type faster than Instagram can acknowledge the question? We have [a test for that](tests/failure-scenarios/races.test.ts).
 
 ## Run it
 
@@ -27,9 +27,9 @@ You'll see your workspace, account count, recent runs and lead count. The exampl
 
 ## Why Postgres and Temporal?
 
-Postgres remembers which comment started the run and which sends we attempted. Temporal remembers where to pick up if the person replies tomorrow. Each run sticks to the rule version it started with, even if someone edits the rule over lunch.
+Someone is halfway through typing their email when you deploy a new worker and change the pricing link. Which link should the worker send? The one their conversation started with. Postgres keeps that rule version and the send history. Temporal picks up the wait with the original deadline.
 
-Say Instagram accepts the DM, then the connection drops before we get a response. A timeout is a lousy reason to DM someone twice. We hold the conversation so an operator can check Instagram before deciding whether to retry. [How it works](docs/design.md)
+Say Instagram accepts the DM, then the connection drops before we get a response. A timeout is a lousy reason to DM someone twice. We hold the conversation so an operator can check Instagram before deciding whether to retry. [Follow one comment through the backend](docs/design.md)
 
 ## How far can you test it?
 
