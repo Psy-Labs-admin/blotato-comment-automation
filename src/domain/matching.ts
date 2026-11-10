@@ -31,21 +31,71 @@ export type EmailExtraction =
 
 // Pragmatic format check (not RFC 5322): local@domain.tld, TLD letters only. Format validity is not
 // proof of ownership; the lead is stored as `format_valid_unverified`.
-// Capture the whole candidate first. Matching just its valid-looking substring would turn
-// "alice@example.com123" into a different address and send the link for unusable input.
-const EMAIL_CANDIDATE_RE = /[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~@-]+@[\p{L}\p{N}._-]+/gu;
+// Only explicit prose separators split tokens. Unsupported Unicode and symbols inside a token
+// must fail validation rather than expose an email-shaped suffix or a shortened domain.
+const EMAIL_TOKEN_RE = /[^\s<>()\[\]",;:]+/gu;
+// Emoji are allowed around an address, never removed from inside its local or domain part.
+const EMAIL_EMOJI_RE = /\p{Extended_Pictographic}(?:[\uFE0E\uFE0F]|\p{Emoji_Modifier}|\u200d\p{Extended_Pictographic})*/gu;
 const LOCAL_PART_RE = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~+-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~+-]+)*$/;
 const DOMAIN_RE = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
 
+function stripEmailEdgeEmoji(candidate: string): string {
+  let prefixEnd = 0;
+  let suffixStart = candidate.length;
+  let previousEnd = -1;
+  // Scan once instead of repeatedly searching for an emoji suffix in a long malformed token.
+  for (const match of candidate.matchAll(EMAIL_EMOJI_RE)) {
+    const end = match.index + match[0].length;
+    if (match.index === prefixEnd) prefixEnd = end;
+    if (match.index !== previousEnd) suffixStart = match.index;
+    previousEnd = end;
+  }
+  const end = previousEnd === candidate.length ? suffixStart : candidate.length;
+  return candidate.slice(prefixEnd, Math.max(prefixEnd, end));
+}
+
+function stripEmailPunctuation(token: string): string {
+  const text = token.replace(/[.!?]+$/, '').replace(/^[“‘«]+|[”’»]+$/gu, '');
+  // A pair of straight quotes wraps the address; an apostrophe inside the local part belongs to it.
+  return text.startsWith("'") && text.endsWith("'") ? text.slice(1, -1) : text;
+}
+
+function emailFromToken(candidate: string): string | undefined {
+  // A user may put quotes around an emoji or the emoji around the quotes.
+  const raw = stripEmailPunctuation(stripEmailEdgeEmoji(stripEmailPunctuation(candidate)));
+  const at = raw.indexOf('@');
+  if (at < 1 || at > 64 || raw.length > 254) return undefined;
+  const local = raw.slice(0, at);
+  const domain = raw.slice(at + 1);
+  if (!LOCAL_PART_RE.test(local) || !DOMAIN_RE.test(domain)) return undefined;
+  return `${local}@${domain.toLowerCase()}`;
+}
+
 /** Finds exactly one distinct email address in free text; never guesses between several. */
 export function extractEmail(text: string): EmailExtraction {
-  const matches = text.normalize('NFKC').match(EMAIL_CANDIDATE_RE) ?? [];
+  // A URL can contain @ in userinfo or query parameters. It is not an email reply.
+  const normalizedText = text.normalize('NFKC').replace(/\S+/g, (chunk) => chunk.includes('://') ? ' ' : chunk);
+  const tokens = [...normalizedText.matchAll(EMAIL_TOKEN_RE)];
   const distinct = new Map<string, string>();
-  for (const candidate of matches) {
-    const raw = candidate.replace(/\.+$/, ''); // sentence-ending punctuation
-    const at = raw.lastIndexOf('@');
-    if (raw.length > 254 || at > 64 || !LOCAL_PART_RE.test(raw.slice(0, at)) || !DOMAIN_RE.test(raw.slice(at + 1))) continue;
-    const normalised = `${raw.slice(0, at)}@${raw.slice(at + 1).toLowerCase()}`;
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    const candidate = token[0];
+    if (!candidate.includes('@')) continue;
+    const previous = tokens[i - 1];
+    const next = tokens[i + 1];
+    // Whitespace around @ or a following .label is a broken token, not a request to repair it.
+    // A complete address before a sentence dot is independent, including before another address.
+    // Mentions (including dotted handles) are independent prose; standalone @ is a broken fragment.
+    if (previous && /^\s+$/.test(normalizedText.slice(previous.index + previous[0].length, token.index))) {
+      const before = previous[0];
+      if (before.endsWith('@') || (before.includes('@') && before.endsWith('.') && !emailFromToken(before))) continue;
+    }
+    if (next && /^\s+$/.test(normalizedText.slice(token.index + candidate.length, next.index))) {
+      const after = next[0];
+      if (after === '@' || /^\.[\p{L}\p{N}]/u.test(after)) continue;
+    }
+    const normalised = emailFromToken(candidate);
+    if (!normalised) continue;
     const key = normalised.toLowerCase();
     if (!distinct.has(key)) distinct.set(key, normalised);
   }

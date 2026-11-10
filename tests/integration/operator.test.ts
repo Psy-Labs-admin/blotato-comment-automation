@@ -55,6 +55,22 @@ describe('operator drafts and trusted accounts', () => {
   beforeAll(async () => { data = await createTestDb(); });
   afterAll(async () => { await Promise.all(servers.map((app) => app.close())); await data?.drop(); });
 
+  it('points to an invalid pasted field and keeps the saved draft intact for a correction', async () => {
+    const tenantId = await createTenant(data.db, 'Draft validation');
+    const app = server();
+    const draft = await create(app, tenantId);
+    const edit = (publicReply: string) => app.inject({
+      method: 'PATCH', url: '/operator/automations/' + draft.id, headers: headers(tenantId),
+      payload: { expectedRevision: draft.revision, content: { publicReply } },
+    });
+    const rejected = await edit('paste\u0000here');
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json().issues).toEqual([expect.objectContaining({ field: 'content.publicReply' })]);
+    const corrected = await edit('Всё готово 👩‍💻');
+    expect(corrected.statusCode).toBe(200);
+    expect(corrected.json().draft).toMatchObject({ revision: draft.revision + 1, content: { publicReply: 'Всё готово 👩‍💻' } });
+  });
+
   it('starts empty and persists a partial draft without inventing an account or an execution', async () => {
     const tenant = await createTenant(data.db, 'Operator workspace');
     const app = server();
@@ -90,6 +106,7 @@ describe('operator drafts and trusted accounts', () => {
     const other = await createTenant(data.db, 'Other operator');
     const accountId = 'real-contract-' + randomUUID();
     expect((await app.inject({ method: 'POST', url: '/integrations/accounts', payload: { accountId } })).statusCode).toBe(401);
+    expect((await account(app, tenant, { accountId: ' ' + accountId, status: 'unauthorized' })).response.statusCode).toBe(400);
     const connected = await account(app, tenant, { accountId });
     expect(connected.response.statusCode).toBe(200);
     expect((await connected.deliver()).json()).toEqual({ duplicate: true });

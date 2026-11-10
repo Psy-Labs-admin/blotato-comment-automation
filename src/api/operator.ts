@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isUtf8 } from 'node:buffer';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool } from 'pg';
 import { z } from 'zod';
@@ -6,6 +7,8 @@ import type { IntegrationMode } from '../domain/types';
 import type { Clock } from '../domain/clock';
 import { DefinitionError } from '../domain/definition';
 import { withTx } from '../storage/db';
+import { storableText } from '../storage/text';
+import { providerId, eventTimestamp } from '../ingest/events';
 import { resolveIncident } from '../alerts/incidents';
 import { draftDto, connectionIssue, OperatorError } from '../storage/drafts';
 import { createDraft, editDraft, publishDraft, listAccounts } from './draft-actions';
@@ -27,10 +30,10 @@ const Capabilities = z.object({
   recipientHourlyLimit: z.number().int().nonnegative(), reconciliation: z.enum(['lookup_by_client_ref', 'none']),
 }).strict();
 const AccountEvent = z.object({
-  type: z.literal('instagram.account.updated'), eventId: Uuid, tenantId: Uuid, accountId: z.string().trim().min(1).max(200),
-  displayName: z.string().trim().min(1).max(200), status: z.enum(['active', 'disconnected', 'unauthorized']),
+  type: z.literal('instagram.account.updated'), eventId: Uuid, tenantId: Uuid, accountId: providerId,
+  displayName: storableText.trim().min(1).max(200), status: z.enum(['active', 'disconnected', 'unauthorized']),
   capabilities: Capabilities, integrationRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-  occurredAt: z.string().datetime({ offset: true }),
+  occurredAt: eventTimestamp,
 }).strict();
 
 async function respond(reply: FastifyReply, run: () => Promise<unknown>): Promise<unknown> {
@@ -139,6 +142,7 @@ export function registerOperator(app: FastifyInstance, deps: OperatorDeps, tenan
       if (!Buffer.isBuffer(req.body) || !validWebhook(req.body, req.headers['x-integration-timestamp'], req.headers['x-integration-signature'], deps.provisioningSecret, deps.clock.now())) {
         return reply.code(401).send({ error: 'Invalid account integration signature.' });
       }
+      if (!isUtf8(req.body)) return reply.code(400).send({ error: 'Invalid JSON.' });
       let raw: unknown;
       try { raw = JSON.parse(req.body.toString('utf8')); } catch { return reply.code(400).send({ error: 'Invalid JSON.' }); }
       const event = AccountEvent.parse(raw);

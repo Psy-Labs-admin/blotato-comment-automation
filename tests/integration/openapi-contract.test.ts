@@ -44,10 +44,13 @@ it('is a valid OpenAPI 3.1 document with unique operation IDs and resolvable JSO
 it('expresses strict draft replacement inputs, revision checks, and required nullable response fields', () => {
   const patch = schemaFor('#/components/schemas/UpdateDraft');
   expect(patch({ expectedRevision: 1, connectionId: null, content: {} })).toBe(true);
+  expect(patch({ expectedRevision: 1, name: 'Привет 👩‍💻' })).toBe(true);
   for (const invalid of [
     {},
     { expectedRevision: 0 },
     { expectedRevision: 1, content: { typo: true } },
+    { expectedRevision: 1, name: 'bad\u0000name' },
+    { expectedRevision: 1, content: { postIds: ['bad\ud800id'] } },
     { expectedRevision: 1, unknown: true },
   ])
     expect(patch(invalid)).toBe(false);

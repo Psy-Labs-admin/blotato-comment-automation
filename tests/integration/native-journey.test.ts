@@ -20,7 +20,16 @@ import { createTestDb } from '../helpers/db';
 import { createTestAccess } from '../helpers/test-access';
 
 /** One disposable workspace exercises the native HTTP entry points and the durable worker together. */
-it('connects Instagram, publishes a draft, and turns duplicated signed Meta events into one conversation and one link', async () => {
+it.each([
+  { scenario: 'clean duplicated reply', rejected: [] },
+  { scenario: 'malformed address then two addresses in one DM', rejected: [
+    { text: 'buyer@example.com@other.io', result: 'invalid', reason: 'email_invalid' },
+    { text: 'buyer@example.com or other@example.org', result: 'ambiguous', reason: 'email_ambiguous' },
+  ] },
+  { scenario: 'invisible character in address', rejected: [
+    { text: 'al\u200Bice@example.com', result: 'invalid', reason: 'email_invalid' },
+  ] },
+])('connects Instagram, publishes a draft, and captures one corrected lead and link: $scenario', async ({ rejected }) => {
   const data = await createTestDb();
   const auth = createTestAccess();
   const tenantId = await createTenant(data.db, 'Native journey verification');
@@ -174,10 +183,35 @@ it('connects Instagram, publishes a draft, and turns duplicated signed Meta even
     const run = await until(async () => (await data.db.query('SELECT id,status FROM automation_runs WHERE tenant_id=$1', [tenantId])).rows[0],
       (value) => value?.status === 'waiting_input');
     expect(sends).toHaveLength(2);
-    const message = { object: 'instagram', entry: [{ id: accountId, time: Math.floor(Date.now() / 1000), messaging: [
-      { sender: { id: participantId }, recipient: { id: accountId }, timestamp: Date.now(),
-        message: { mid: 'test-only-inbound-email', text: 'journey@example.org' } },
-    ] }] };
+    const messagePayload = (mid: string, text: string) => ({
+      object: 'instagram', entry: [{ id: accountId, time: Math.floor(Date.now() / 1000), messaging: [
+        { sender: { id: participantId }, recipient: { id: accountId }, timestamp: Date.now(), message: { mid, text } },
+      ] }],
+    });
+    for (const [index, input] of rejected.entries()) {
+      expect((await deliver(messagePayload('test-only-rejected-' + index, input.text))).statusCode).toBe(200);
+      // A durable decision proves the worker evaluated this exact message before the negative assertions.
+      const decision = await until(async () => (await data.db.query(`
+        SELECT ic.result,a.reason FROM input_consumptions ic
+        JOIN inbox_events e ON e.id=ic.inbox_event_id
+        JOIN run_audit_events a ON a.inbox_event_id=e.id AND a.type='input.rejected'
+        JOIN input_waits w ON w.id=ic.wait_id WHERE w.run_id=$1 AND e.text=$2`, [run.id, input.text])).rows[0],
+      (value) => value !== undefined);
+      expect(decision).toEqual({ result: input.result, reason: input.reason });
+      await until(async () => (await data.db.query(`SELECT status FROM message_intents
+        WHERE run_id=$1 AND step_id='email' AND action_no=2`, [run.id])).rows[0],
+      (value) => value?.status === 'accepted');
+      expect((await data.db.query('SELECT status,clarifications_used FROM input_waits WHERE run_id=$1', [run.id])).rows)
+        .toEqual([{ status: 'active', clarifications_used: 1 }]);
+      expect((await data.db.query('SELECT status FROM automation_runs WHERE id=$1', [run.id])).rows[0].status).toBe('waiting_input');
+      expect((await data.db.query('SELECT id FROM leads WHERE run_id=$1', [run.id])).rowCount).toBe(0);
+      expect((await data.db.query("SELECT id FROM outbox WHERE kind='crm.lead_captured'")).rowCount).toBe(0);
+      expect(crm.size).toBe(0);
+      expect(sends).toHaveLength(3);
+      expect(sends[2].body).toEqual({ recipient: { id: participantId }, message: { text: content.clarificationText } });
+      expect((await data.db.query("SELECT id FROM message_intents WHERE run_id=$1 AND step_id='send_link'", [run.id])).rowCount).toBe(0);
+    }
+    const message = messagePayload('test-only-inbound-email', 'journey@example.org');
     const messageAcks = await Promise.all([deliver(message), deliver(message)]);
     expect(messageAcks.map((response) => response.statusCode)).toEqual([200, 200]);
     await until(async () => (await data.db.query(`SELECT r.status,l.crm_status FROM automation_runs r
@@ -186,14 +220,19 @@ it('connects Instagram, publishes a draft, and turns duplicated signed Meta even
     expect(sends).toEqual([
       { path: '/v24.0/' + commentId + '/replies', body: { message: content.publicReply }, authorization: 'Bearer ' + longToken },
       { path: '/v24.0/' + accountId + '/messages', body: { recipient: { comment_id: commentId }, message: { text: content.emailPrompt } }, authorization: 'Bearer ' + longToken },
+      ...(rejected.length ? [{ path: '/v24.0/' + accountId + '/messages', body: { recipient: { id: participantId }, message: { text: content.clarificationText } }, authorization: 'Bearer ' + longToken }] : []),
       { path: '/v24.0/' + accountId + '/messages', body: { recipient: { id: participantId }, message: { text: content.linkText + '\n' + content.linkUrl } }, authorization: 'Bearer ' + longToken },
     ]);
     expect((await data.db.query('SELECT id FROM automation_runs')).rowCount).toBe(1);
     expect((await data.db.query('SELECT email FROM leads')).rows).toEqual([{ email: 'journey@example.org' }]);
-    expect((await data.db.query('SELECT id FROM inbox_events')).rowCount).toBe(2);
+    expect((await data.db.query('SELECT id FROM inbox_events')).rowCount).toBe(2 + rejected.length);
     expect((await data.db.query("SELECT status FROM message_intents ORDER BY created_at")).rows).toEqual([
-      { status: 'accepted' }, { status: 'accepted' }, { status: 'accepted' },
+      { status: 'accepted' }, { status: 'accepted' },
+      ...(rejected.length ? [{ status: 'accepted' }] : []), { status: 'accepted' },
     ]);
+    expect((await data.db.query(`SELECT ic.result FROM input_consumptions ic
+      JOIN input_waits w ON w.id=ic.wait_id WHERE w.run_id=$1 ORDER BY ic.created_at`, [run.id])).rows)
+      .toEqual([...rejected.map(({ result }) => ({ result })), { result: 'valid' }]);
     expect(crm.size).toBe(1);
   } finally {
     await app.close();

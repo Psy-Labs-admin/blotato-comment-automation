@@ -1,3 +1,4 @@
+import { isUtf8 } from 'node:buffer';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
@@ -6,24 +7,24 @@ import type { Clock } from '../domain/clock';
 import { isStopCommand } from '../domain/matching';
 import type { Metrics } from '../observability/metrics';
 import { ingestEvent } from '../ingest/ingest';
-import type { NormalizedEvent } from '../ingest/events';
+import { providerId, type NormalizedEvent } from '../ingest/events';
+import { storableText as Text } from '../storage/text';
 
-const Id = z.string().min(1).max(200);
 const envelope = z.object({
-  object: z.literal('instagram'),
-  entry: z.array(z.object({
-    id: Id, time: z.number().finite().nonnegative().max(8_640_000_000_000_000),
-    changes: z.array(z.object({ field: z.string(), value: z.unknown() })).optional(),
-    messaging: z.array(z.unknown()).optional(),
-  })).max(1000),
+  object: z.literal('instagram'), entry: z.array(z.unknown()).max(1000),
 });
+const entrySchema = z.object({
+  id: providerId, time: z.number().finite().nonnegative().max(8_640_000_000_000_000),
+  changes: z.array(z.unknown()).catch([]).optional(), messaging: z.array(z.unknown()).catch([]).optional(),
+});
+const changeSchema = z.object({ field: z.string(), value: z.unknown() });
 const comment = z.object({
-  id: Id, text: z.string().max(5000), from: z.object({ id: Id, username: z.string().max(100).optional() }),
-  media: z.object({ id: Id }), timestamp: z.union([z.string(), z.number()]).optional(), verb: z.string().optional(),
+  id: providerId, text: Text.max(5000), from: z.object({ id: providerId, username: Text.max(100).optional() }),
+  media: z.object({ id: providerId }), timestamp: z.union([z.string(), z.number()]).optional(), verb: z.string().optional(),
 });
 const message = z.object({
-  sender: z.object({ id: Id }), recipient: z.object({ id: Id }), timestamp: z.number().finite().nonnegative().max(8_640_000_000_000_000),
-  message: z.object({ mid: Id, text: z.string().max(5000).optional(), is_echo: z.boolean().optional(), is_deleted: z.boolean().optional() }),
+  sender: z.object({ id: providerId }), recipient: z.object({ id: providerId }), timestamp: z.number().finite().nonnegative().max(8_640_000_000_000_000),
+  message: z.object({ mid: providerId, text: Text.max(5000).optional(), is_echo: z.boolean().optional(), is_deleted: z.boolean().optional() }),
 });
 
 export interface InstagramWebhookDeps {
@@ -51,8 +52,9 @@ function occurredAt(raw: string | number, fallback: number): string {
   let milliseconds: number;
   if (typeof raw === 'string') milliseconds = Date.parse(raw);
   else milliseconds = raw < 1_000_000_000_000 ? raw * 1000 : raw;
-  if (!Number.isFinite(milliseconds) || milliseconds < 0) milliseconds = fallback < 1_000_000_000_000 ? fallback * 1000 : fallback;
-  if (milliseconds > 8_640_000_000_000_000) milliseconds = fallback;
+  if (!Number.isFinite(milliseconds) || milliseconds < 0 || milliseconds > 8_640_000_000_000_000) {
+    milliseconds = fallback < 1_000_000_000_000 ? fallback * 1000 : fallback;
+  }
   return new Date(milliseconds).toISOString();
 }
 
@@ -83,6 +85,7 @@ export function registerInstagramWebhook(app: FastifyInstance, deps: InstagramWe
         }
         let raw: unknown;
         try {
+          if (!isUtf8(req.body)) throw new Error('Invalid UTF-8');
           raw = JSON.parse(req.body.toString('utf8'));
         } catch {
           count('invalid');
@@ -94,7 +97,10 @@ export function registerInstagramWebhook(app: FastifyInstance, deps: InstagramWe
           return reply.code(400).send({ error: 'Invalid Instagram webhook' });
         }
         let accepted = 0;
-        for (const entry of parsed.data.entry) {
+        for (const rawEntry of parsed.data.entry) {
+          const parsedEntry = entrySchema.safeParse(rawEntry);
+          if (!parsedEntry.success) continue;
+          const entry = parsedEntry.data;
           const account = await deps.db.query(
             `SELECT c.id, c.status, c.verified_at, k.expires_at FROM social_connections c JOIN instagram_credentials k ON k.connection_id = c.id
              WHERE c.platform = 'instagram' AND c.external_account_id = $1 AND c.integration_kind = 'native' AND c.status <> 'disconnected'`,
@@ -104,9 +110,10 @@ export function registerInstagramWebhook(app: FastifyInstance, deps: InstagramWe
           const binding = account.rows[0];
           const ordinary = binding.status === 'active' && binding.verified_at && binding.expires_at > deps.clock.now();
           const events: NormalizedEvent[] = [];
-          for (const change of entry.changes ?? []) {
-            if (!ordinary || change.field !== 'comments') continue;
-            const value = comment.safeParse(change.value);
+          for (const rawChange of entry.changes ?? []) {
+            const change = changeSchema.safeParse(rawChange);
+            if (!ordinary || !change.success || change.data.field !== 'comments') continue;
+            const value = comment.safeParse(change.data.value);
             if (!value.success || (value.data.verb && !['add', 'created'].includes(value.data.verb))) continue;
             events.push({
               type: 'comment.created', accountId: entry.id, commentId: value.data.id, mediaId: value.data.media.id,
@@ -131,11 +138,8 @@ export function registerInstagramWebhook(app: FastifyInstance, deps: InstagramWe
             const result = await ingestEvent({ db: deps.db, clock: deps.clock, source:'native' }, event);
             const outcome = result.status === 'accepted' && result.duplicate ? 'duplicate' : result.status;
             deps.metrics?.nativeWebhookEvents.inc({ type: event.type, result: outcome });
-            if (result.status === 'rejected' && result.httpStatus === 404) continue;
-            if (result.status !== 'accepted') {
-              count('rejected');
-              return reply.code(503).send({ error: 'Instagram event could not be stored' });
-            }
+            // Invalid input and unknown accounts are permanent. A storage failure throws and fails the delivery.
+            if (result.status === 'rejected') continue;
             accepted++;
           }
         }

@@ -1,19 +1,20 @@
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
+import { storableText } from './text';
 import { parseDefinition, type AutomationDefinition } from '../domain/definition';
 import { parseCapabilities, missingCapabilities, type IntegrationMode } from '../domain/types';
 
-const OptionalText = z.string().max(1000);
+const OptionalText = storableText.max(1000);
 export const DraftContentSchema = z.object({
-  keyword: z.string().max(60).optional(),
+  keyword: storableText.max(60).optional(),
   publicReply: OptionalText.optional(),
   emailPrompt: OptionalText.optional(),
   linkText: OptionalText.optional(),
-  linkUrl: z.string().max(2048).optional(),
+  linkUrl: storableText.max(2048).optional(),
   timeoutHours: z.number().int().min(1).max(720).optional(),
   clarificationText: OptionalText.optional(),
   maxClarifications: z.number().int().min(0).max(3).optional(),
-  postIds: z.array(z.string().trim().min(1).max(200)).max(1000).optional(),
+  postIds: z.array(storableText.trim().min(1).max(200)).max(1000).optional(),
 }).strict();
 export type DraftContent = z.infer<typeof DraftContentSchema>;
 

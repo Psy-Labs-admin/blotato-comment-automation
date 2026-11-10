@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Clock } from '../domain/clock';
 import type { IntegrationMode } from '../domain/types';
 import { withTx } from '../storage/db';
+import { storableText } from '../storage/text';
 import {
   assertPublishableConnection,
   DraftContentSchema,
@@ -21,7 +22,7 @@ const Uuid = z
   .string()
   .uuid()
   .transform((value) => value.toLowerCase());
-const Name = z.string().trim().min(1).max(200);
+const Name = storableText.trim().min(1).max(200);
 const CreateDraft = z
   .object({ name: Name, content: DraftContentSchema.optional(), connectionId: Uuid.optional() })
   .strict();

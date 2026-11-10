@@ -35,13 +35,30 @@ describe('cancel, opt-out and human takeover', () => {
     expect(h.messagesFor('held_user')).toHaveLength(1);
   });
 
-  it('STOP during the wait cancels the run, nothing more is sent, and future triggers are suppressed', async () => {
-    const { runId } = await h.comment('stop_user');
+  it.each(['STOP', 'STOP!! 🙏'])('%s during the wait cancels the run and suppresses future triggers', async (command) => {
+    const participant = command === 'STOP' ? 'stop_user' : 'stop_punctuation_user';
+    const { runId } = await h.comment(participant);
     await h.waitForRun(runId!, 'waiting_input');
-    await h.dm('stop_user', 'STOP');
+    expect((await h.dm(participant, command)).outcome).toBe('stop_command');
     expect(await h.waitForRun(runId!)).toMatchObject({ status: 'cancelled', status_reason: 'opted_out' });
-    expect(h.messagesFor('stop_user')).toHaveLength(0);
-    expect((await h.comment('stop_user')).outcome).toBe('opted_out');
+    expect(await h.wait(runId!)).toMatchObject({ status: 'cancelled' });
+    expect(await h.conversationOf(runId!)).toMatchObject({ opted_out: true, owner_run_id: null });
+    expect(await h.lead(runId!)).toBeUndefined();
+    expect(h.messagesFor(participant)).toHaveLength(0);
+    expect((await h.comment(participant)).outcome).toBe('opted_out');
+    expect((await h.db.query(`SELECT id FROM automation_runs WHERE conversation_id=$1`,
+      [(await h.conversationOf(runId!)).id])).rows).toEqual([{ id: runId }]);
+  });
+
+  it('embedded stop text is an email reply, not an opt-out command', async () => {
+    const participant = 'embedded_stop_user';
+    const { runId } = await h.comment(participant);
+    await h.waitForRun(runId!, 'waiting_input');
+    expect((await h.dm(participant, 'Please do not stop; contact stop@example.com')).outcome).toBe('input_pending');
+    expect(await h.waitForRun(runId!)).toMatchObject({ status: 'completed' });
+    expect(await h.lead(runId!)).toMatchObject({ email: 'stop@example.com' });
+    expect(await h.conversationOf(runId!)).toMatchObject({ opted_out: false, owner_run_id: null });
+    expect(h.messagesFor(participant)).toHaveLength(1);
   });
 
   it('human takeover during the wait hands the conversation to a person', async () => {

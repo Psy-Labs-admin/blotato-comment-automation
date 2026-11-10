@@ -5,6 +5,7 @@ import { resolveIncident } from '../alerts/incidents';
 import { audit } from '../storage/audit';
 import { withTx } from '../storage/db';
 import { OperatorError } from '../storage/drafts';
+import { storableText } from '../storage/text';
 import {
   DELIVERY_KINDS,
   DELIVERY_LABELS,
@@ -39,7 +40,7 @@ const deliveryFilter = z.object({
   cursor: bigintId.optional(),
   limit: z.coerce.number().int().min(1).max(50).default(25),
 });
-const retryBody = z.object({ expectedGeneration: generation, note: z.string().trim().min(1).max(500) }).strict();
+const retryBody = z.object({ expectedGeneration: generation, note: storableText.trim().min(1).max(500) }).strict();
 const incidentLabels: Record<string, { title: string; action: string }> = {
   send_outcome_unknown: {
     title: 'Message confirmation missing',

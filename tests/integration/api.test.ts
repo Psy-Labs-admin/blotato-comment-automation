@@ -40,6 +40,15 @@ describe('HTTP API', () => {
     expect(bad.statusCode).toBe(400);
     expect(bad.json().issues.length).toBeGreaterThan(0);
 
+    for (const invalid of [
+      { name: 'bad\u0000name', definition: pricingDefinition },
+      { name: 'Broken reply', definition: { ...pricingDefinition, steps: [{ id: 'reply', type: 'reply_comment', text: 'bad\ud800text' }] } },
+    ]) {
+      const response = await app.inject({ method: 'POST', url: '/automations', headers: as(tn.tenantId),
+        payload: { connectionId: tn.connectionId, ...invalid } });
+      expect(response.statusCode).toBe(400);
+    }
+
     const ok = await app.inject({
       method: 'POST', url: '/automations', headers: as(tn.tenantId),
       payload: { connectionId: tn.connectionId, name: 'pricing', definition: pricingDefinition, priority: 1 },

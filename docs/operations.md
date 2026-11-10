@@ -21,7 +21,7 @@ Keep dependencies on trusted networks. `HOST` defaults to loopback. See the [mac
 | Console and legacy endpoints | `TENANT_TOKEN_HASHES` maps tenant UUIDs to SHA-256 token digests. Use distinct high-entropy tokens. Signing in with a credential or a one-use ticket starts an eight-hour HttpOnly, SameSite=Strict session. Cookie writes need `x-csrf-token`. Set public HTTPS `CONSOLE_ORIGIN` for cookies and alert links. |
 | Machine `/api/v1` | Separate `blt_` bearer keys. `read` permits GET/HEAD, `write` adds mutations. Requests check tenant, scope and revocation. Conflicting `x-tenant-id` gets 403. Lookups stay tenant-scoped. |
 | Monitoring | `/metrics` needs the separate bearer token matching `METRICS_TOKEN_HASH`. `/live`, `/health` and `/ready` are public. |
-| Gateway `/webhooks/instagram` | Sign with `WEBHOOK_SIGNING_SECRET` using HMAC-SHA256 over the timestamp, a literal dot and the exact UTF-8 body. Send Unix seconds in `x-webhook-timestamp` and `sha256=<lowercase hex>` in `x-webhook-signature`. Re-sign retries older than five minutes. Event IDs still deduplicate. |
+| Gateway `/webhooks/instagram` | Sign with `WEBHOOK_SIGNING_SECRET` using HMAC-SHA256 over the timestamp, a literal dot and the exact UTF-8 body. Send Unix seconds in `x-webhook-timestamp` and `sha256=<lowercase hex>` in `x-webhook-signature`. Send provider IDs exactly as issued. Padded IDs return 400. Re-sign retries older than five minutes. Event IDs still deduplicate. |
 | Native `/integrations/instagram/webhook` | `META_APP_SECRET` verifies the raw body. GET verification has its own token. Follow [Instagram setup](instagram.md). |
 
 Issue keys from a trusted machine after migrations.

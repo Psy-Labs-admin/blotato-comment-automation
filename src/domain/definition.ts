@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { storableText } from '../storage/text';
 import { parseDuration } from './duration';
 import { tokenize } from './matching';
 
@@ -9,7 +10,7 @@ import { tokenize } from './matching';
  */
 
 const StepId = z.string().regex(/^[a-z][a-z0-9_]{0,40}$/, 'step id must be snake_case');
-const Text = z.string().trim().min(1).max(1000);
+const Text = storableText.trim().min(1).max(1000);
 
 const ReplyCommentStep = z.object({ id: StepId, type: z.literal('reply_comment'), text: Text });
 const SendPrivateReplyStep = z.object({ id: StepId, type: z.literal('send_private_reply'), text: Text });
@@ -36,9 +37,9 @@ export const AutomationDefinitionSchema = z.object({
   trigger: z.object({
     type: z.literal('comment.created'),
     platform: z.literal('instagram'),
-    keyword: z.string().trim().min(1).max(60),
+    keyword: storableText.trim().min(1).max(60),
     match: z.literal('whole_word_case_insensitive'),
-    posts: z.union([z.literal('all_supported'), z.object({ mediaIds: z.array(z.string().min(1)).min(1) })]),
+    posts: z.union([z.literal('all_supported'), z.object({ mediaIds: z.array(storableText.min(1)).min(1) })]),
   }),
   steps: z.array(StepSchema).min(1).max(10),
 });

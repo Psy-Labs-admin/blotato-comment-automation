@@ -1,3 +1,4 @@
+import { isUtf8 } from 'node:buffer';
 import type { RequestTrace, TraceRouteGroup, Tracing } from '../observability/tracing';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Pool } from 'pg';
@@ -22,6 +23,7 @@ import { registerOperations } from './operations';
 import { readPipelineHealth, type OperationsConfig } from '../observability/operations';
 import { registerOperator } from './operator';
 import { OperatorError } from '../storage/drafts';
+import { storableText } from '../storage/text';
 import { bearerDigest, validWebhook, type ApiAccess } from './access';
 import { registerConsole } from '../ui';
 import { registerDocumentation } from './documentation';
@@ -162,6 +164,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
       }
       let event;
       try {
+        if (!isUtf8(req.body)) throw new Error('Invalid UTF-8');
         event = JSON.parse(req.body.toString('utf8'));
       } catch {
         return reply.code(400).send({ error: 'Invalid JSON' });
@@ -206,7 +209,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   // ---- Automations ------------------------------------------------------------------------------
   const CreateAutomation = z.object({
     connectionId: Uuid,
-    name: z.string().min(1).max(200),
+    name: storableText.min(1).max(200),
     definition: z.unknown(),
     priority: z.number().int().min(-1000).max(1000).optional(),
     cooldownSeconds: z.number().int().min(0).max(30 * 86400).optional(),
@@ -412,7 +415,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   });
 
   // ---- Operator resolution of uncertain sends -------------------------------------------------------
-  const Resolve = z.object({ resolution: z.enum(['accepted', 'not_sent']), note: z.string().trim().min(1).max(500) });
+  const Resolve = z.object({ resolution: z.enum(['accepted', 'not_sent']), note: storableText.trim().min(1).max(500) });
 
   app.post('/intents/:id/resolve', async (req, reply) => {
     const tenantId = tenantOf(req, reply);

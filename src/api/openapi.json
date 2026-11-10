@@ -1098,23 +1098,28 @@
         "properties": {
           "keyword": {
             "type": "string",
-            "maxLength": 60
+            "maxLength": 60,
+            "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
           },
           "publicReply": {
             "type": "string",
-            "maxLength": 1000
+            "maxLength": 1000,
+            "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
           },
           "emailPrompt": {
             "type": "string",
-            "maxLength": 1000
+            "maxLength": 1000,
+            "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
           },
           "linkText": {
             "type": "string",
-            "maxLength": 1000
+            "maxLength": 1000,
+            "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
           },
           "linkUrl": {
             "type": "string",
-            "maxLength": 2048
+            "maxLength": 2048,
+            "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
           },
           "timeoutHours": {
             "type": "integer",
@@ -1123,7 +1128,8 @@
           },
           "clarificationText": {
             "type": "string",
-            "maxLength": 1000
+            "maxLength": 1000,
+            "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
           },
           "maxClarifications": {
             "type": "integer",
@@ -1135,7 +1141,8 @@
             "items": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 200
+              "maxLength": 200,
+              "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
             },
             "maxItems": 1000
           }
@@ -1239,7 +1246,8 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 200,
-            "description": "We trim surrounding whitespace before checking and saving this value."
+            "description": "We trim surrounding whitespace before checking and saving this value.",
+            "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
           },
           "content": {
             "$ref": "#/components/schemas/DraftContent"
@@ -1265,7 +1273,8 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 200,
-            "description": "We trim surrounding whitespace before checking and saving this value."
+            "description": "We trim surrounding whitespace before checking and saving this value.",
+            "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
           },
           "content": {
             "$ref": "#/components/schemas/DraftContent"

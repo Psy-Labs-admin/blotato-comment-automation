@@ -114,7 +114,7 @@ describe('native Instagram webhook', () => {
     await data.db.query("UPDATE instagram_credentials SET expires_at=now()-interval '1 minute' WHERE connection_id=$1", [account.connectionId]);
     await data.db.query("UPDATE social_connections SET status='unauthorized',verified_at=NULL WHERE id=$1", [account.connectionId]);
     const payload = { object: 'instagram', entry: [{ id: account.accountId, time: Date.now(), messaging: [
-      { sender: { id: 'opted-out-customer' }, recipient: { id: account.accountId }, timestamp: Date.now(), message: { mid: 'stop-while-expired', text: 'STOP' } },
+      { sender: { id: 'opted-out-customer' }, recipient: { id: account.accountId }, timestamp: Date.now(), message: { mid: 'stop-while-expired', text: 'STOP 🛑' } },
       { sender: { id: 'ignored-during-expiry' }, recipient: { id: account.accountId }, timestamp: Date.now(), message: { mid: 'ordinary-while-expired', text: 'hello' } },
     ] }] };
     expect((await delivery(payload)).statusCode).toBe(200);
@@ -127,6 +127,82 @@ describe('native Instagram webhook', () => {
     const event = await ingestEvent({ db: data.db, clock: systemClock, source:'native' }, commentEvent({ accountId: account.accountId, from: 'opted-out-customer' }));
     if (event.status !== 'accepted') throw new Error('Trigger not stored');
     expect(await routeEvent({ db: data.db, clock: systemClock }, event.eventId)).toMatchObject({ outcome: 'opted_out', runId: null });
+  });
+
+  it('isolates malformed entries and changes while retaining valid siblings', async () => {
+    const payload = batch(['shape-before', 'shape-after']);
+    (payload.entry as unknown[]).unshift(null, { id: account.accountId, time: -1, changes: [comment('invalid-entry-time')] });
+    (payload.entry[2].changes as unknown[]).splice(1, 0, null, {}, { field: 'comments' }, { field: 42, value: {} });
+    const response = await delivery(payload);
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ received: true, accepted: 2 });
+    const malformedChannel = await delivery({ object: 'instagram', entry: [
+      { ...batch(['valid-channel']).entry[0], messaging: {} },
+      { id: account.accountId, time: Date.now(), changes: {}, messaging: [
+        { sender: { id: 'valid-channel-user' }, recipient: { id: account.accountId }, timestamp: Date.now(), message: { mid: 'valid-channel-message', text: 'hello' } },
+      ] },
+    ] });
+    expect(malformedChannel.json()).toEqual({ received: true, accepted: 2 });
+  });
+
+  it('ignores unstoreable strings and invalid identities without poisoning siblings or opting out another sender', async () => {
+    const payload = batch(['text-before', 'text-after']);
+    for (const text of ['bad\u0000text', 'bad\ud800text', 'bad\udffftext', 'x'.repeat(5001)]) {
+      payload.entry[0].changes.unshift({ field: 'comments', value: { ...comment('bad-text').value, text } });
+    }
+    const messaging = [
+      ...[' customer ', ' ', 'customer\u0001', 'customer\u0000', 'customer\ud800'].map((id, i) => ({
+        sender: { id }, recipient: { id: account.accountId }, timestamp: Date.now(), message: { mid: `bad-stop-${i}`, text: 'STOP' },
+      })),
+      { sender: { id: 'unicode-customer' }, recipient: { id: account.accountId }, timestamp: Date.now(), message: { mid: 'unicode-message', text: 'Hello 😀\n\t世界\u0001' } },
+    ];
+    const response = await delivery({ ...payload, entry: [{ ...payload.entry[0], messaging }] });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ received: true, accepted: 3 });
+    expect((await data.db.query("SELECT id FROM conversations WHERE participant_id='customer' AND opted_out")).rowCount).toBe(0);
+    expect((await data.db.query("SELECT text FROM inbox_events WHERE provider_event_key='unicode-message'")).rows[0].text).toBe('Hello 😀\n\t世界\u0001');
+  });
+
+  it('ignores timestamps beyond the normalized date range and falls back for malformed comment timestamps', async () => {
+    const payload = batch(['date-fallback']);
+    const value = { ...payload.entry[0].changes[0].value, timestamp: 'invalid date' };
+    const response = await delivery({ ...payload, entry: [{ ...payload.entry[0], changes: [{ field: 'comments', value }], messaging: [
+      { sender: { id: 'date-user' }, recipient: { id: account.accountId }, timestamp: 8_640_000_000_000_000, message: { mid: 'invalid-date-message', text: 'hello' } },
+    ] }] });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ received: true, accepted: 1 });
+    const fallback = await delivery({ ...payload, entry: [{ ...payload.entry[0], changes: [
+      { field: 'comments', value: { ...value, id: 'huge-date-fallback', timestamp: 1e16 } },
+    ] }] });
+    expect(fallback.json()).toEqual({ received: true, accepted: 1 });
+    expect((await data.db.query("SELECT occurred_at FROM inbox_events WHERE provider_event_key='huge-date-fallback'")).rows[0].occurred_at.toISOString())
+      .toBe(new Date(payload.entry[0].time * 1000).toISOString());
+  });
+
+  it('keeps exact native size boundaries and rejects invalid envelope shapes', async () => {
+    const payload = batch(['n'.repeat(200)]);
+    payload.entry[0].changes[0].value.text = 'x'.repeat(5000);
+    expect((await delivery(payload)).json()).toEqual({ received: true, accepted: 1 });
+    payload.entry[0].changes[0].value.id += 'x';
+    expect((await delivery(payload)).json()).toEqual({ received: true, accepted: 0 });
+    const bounded = { ...batch(['native-body-boundary']), padding: '' };
+    bounded.padding = 'x'.repeat(1024 * 1024 - Buffer.byteLength(JSON.stringify(bounded)));
+    expect(Buffer.byteLength(JSON.stringify(bounded))).toBe(1024 * 1024);
+    expect((await delivery(bounded)).json()).toEqual({ received: true, accepted: 1 });
+    bounded.padding += 'x';
+    expect((await delivery(bounded)).statusCode).toBe(413);
+    for (const malformed of [null, [], { object: 'instagram', entry: null }, { object: 'other', entry: [] }, { object: 'instagram', entry: Array(1001).fill(null) }]) {
+      expect((await delivery(malformed)).statusCode).toBe(400);
+    }
+  });
+
+  it('rejects malformed UTF-8 after authenticating exact raw bytes', async () => {
+    const encoded = JSON.stringify(batch(['utf8-invalid-comment'])).split('\"customer\"');
+    const raw = Buffer.concat([Buffer.from(encoded[0] + '\"'), Buffer.from([0xff]), Buffer.from('\"' + encoded[1])]);
+    const response = await app.inject({ method: 'POST', url: '/integrations/instagram/webhook', payload: raw, headers: {
+      'content-type': 'application/json', 'x-hub-signature-256': 'sha256=' + createHmac('sha256', secret).update(raw).digest('hex'),
+    } });
+    expect(response.statusCode).toBe(400);
   });
 
   it('does not accept new events for a disconnected account', async () => {

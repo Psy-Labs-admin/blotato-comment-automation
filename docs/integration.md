@@ -106,6 +106,8 @@ Keys are case-sensitive, 1–128 ASCII letters, digits or `._:-`. Changed input 
 
 Without the header, each successful create makes another draft. This contract covers only `POST /drafts`. Repeating successful publication at the same revision returns the existing version. Check other writes' effects before retrying.
 
+Draft text must be valid Unicode. A pasted NUL or a broken surrogate returns `400 invalid_request`. An unsuccessful edit leaves the draft at its previous revision.
+
 ## Verify the client
 
 [Verification](testing.md) covers schemas, credential isolation, revisions, pagination and the runnable client.

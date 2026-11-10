@@ -51,6 +51,27 @@ describe('supported public API', () => {
   const get = (url: string, headers = read) => app.inject({ url: '/api/v1' + url, headers });
   const post = (url: string, payload: Record<string, unknown>, headers = write) =>
     app.inject({ method: 'POST', url: '/api/v1' + url, headers, payload });
+  it('rejects unrepresentable draft text before reserving a retry key or changing a revision', async () => {
+    const headers = { ...write, 'idempotency-key': randomUUID() };
+    for (const body of [
+      { name: 'copied\u0000name' },
+      { name: 'broken\ud800' },
+      { name: 'Greeting', content: { publicReply: 'reply\udc00' } },
+      { name: 'Posts', content: { postIds: ['post\u0000id'] } },
+    ]) {
+      const response = await post('/drafts', body, headers);
+      expect(response.statusCode).toBe(400);
+      expect(response.json().code).toBe('invalid_request');
+    }
+
+    const saved = await post('/drafts', { name: 'Цена ☕️', content: { publicReply: 'Спасибо 👩‍💻' } }, headers);
+    expect(saved.statusCode).toBe(201);
+    const { draft } = saved.json();
+    const invalidEdit = await app.inject({ method: 'PATCH', url: '/api/v1/drafts/' + draft.id, headers: write,
+      payload: { expectedRevision: draft.revision, content: { keyword: 'bad\u0000keyword' } } });
+    expect(invalidEdit.statusCode).toBe(400);
+    expect((await get('/drafts/' + draft.id)).json().draft).toEqual(draft);
+  });
   it('requires integration keys and rejects read-only mutation before accepting a body', async () => {
     for (const headers of [
       {},
