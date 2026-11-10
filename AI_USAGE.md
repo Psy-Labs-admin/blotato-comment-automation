@@ -1,5 +1,5 @@
 # How we used AI
 
-The requester brought the interview brief, reviewed the scope and design, and asked for direct Instagram support, an empty first-run workspace and an API another admin could use.
+The requester chose what to build and reviewed the design. They asked for a console that starts empty, direct Instagram Login and an API another backend could call.
 
-Codex designed the system, wrote the code, tests and docs, then reviewed the changes and ran the checks. The live Meta check confirmed the webhook handshake. The automated suite covers the comment-to-DM flow with controlled provider responses. [What the tests cover](docs/testing.md)
+Codex designed the backend, wrote the implementation, tests and docs, then reviewed the changes and ran the checks. The automated conversation tests control Instagram’s replies, including the one that goes missing after a send. The live Meta check stopped at the webhook handshake. [What you can reproduce](docs/testing.md)

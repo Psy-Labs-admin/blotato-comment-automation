@@ -43,8 +43,8 @@ export function documentationHtml(mode: 'workspace' | 'reference'): string {
 </header>
 <main><div class="api-instructions">${
     publicReference
-      ? 'Browse the endpoints here. To try a request with your own data, open /docs/ on your running workspace.'
-      : 'Choose Authorize and paste your workspace key. Try it out calls this workspace, so any edits you make here will be saved.'
+      ? 'Pick an endpoint to see its request and response. To run it with your own key, open /docs/ on your workspace.'
+      : 'Paste your workspace key under Authorize. Try it out calls this installation. Changes you make here are saved in your workspace.'
   }</div>
 <div id="swagger-ui"></div></main>
 </body></html>`;

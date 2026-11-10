@@ -2,7 +2,7 @@
 
 ## OpenTelemetry tracing
 
-Point the API at an OTLP collector when you want traces. To try it with a local collector, run this.
+Enable tracing with an OTLP endpoint. For a local collector, run this.
 
 ```sh
 OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces \
@@ -10,13 +10,13 @@ OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/json \
 npm start
 ```
 
-`OTEL_EXPORTER_OTLP_ENDPOINT` also works and receives the `/v1/traces` suffix. The traces-specific endpoint takes precedence. `OTEL_SDK_DISABLED=true` disables export. Unsupported protocols fail startup.
+Alternatively, set `OTEL_EXPORTER_OTLP_ENDPOINT`, which gets `/v1/traces` appended. The traces-specific endpoint wins. `OTEL_SDK_DISABLED=true` turns export off. Unsupported protocols stop startup.
 
-A trace follows a request inside one process. It records the HTTP method, status and route group, plus fixed names for ingest, routing, activities and relay work. Once the job moves to another process, follow it in the run timeline.
+Traces record HTTP method, status, route group and fixed ingest/routing/activity/relay names within one process. Follow cross-process work in the run timeline.
 
-Exports include fixed service metadata and generated trace/span IDs. Bodies, emails, customer IDs, headers, raw URLs, SQL and exception text are excluded. Errors retain their status. The batch processor exports every second with a 2,048-span queue and five-second timeout. A full queue drops diagnostic spans. Collector failures don't block webhook acknowledgement or workflow success. Shutdown flushes pending spans.
+Exports include fixed service metadata and generated trace/span IDs. They exclude bodies, emails, customer IDs, headers, raw URLs, SQL and exception text. Errors keep their status. The batch processor exports every second, queues up to 2,048 spans and times out after five seconds. A full queue drops spans. Collector failures leave webhook acknowledgement and workflows running. Shutdown flushes pending spans.
 
-Verify OTLP JSON, parent relationships and sensitive-field exclusion against a local collector.
+Check OTLP JSON, parent relationships and sensitive-field exclusion.
 
 ```sh
 npm test -- tests/integration/tracing.test.ts
@@ -24,34 +24,36 @@ npm test -- tests/integration/tracing.test.ts
 
 ## Reproducible load check
 
-Use Node 24 or later and a local PostgreSQL administrator allowed to create databases. The check creates an isolated API, Temporal dev server, task queue, loopback HTTP simulators and throwaway database. Cleanup drops that database.
+Use Node 24+ and a local PostgreSQL administrator with database-creation permission. The check starts an isolated API, Temporal dev server, task queue, loopback HTTP simulators and throwaway database, dropped during cleanup.
 
 ```sh
 DATABASE_ADMIN_URL=postgres://postgres:postgres@localhost:55432/postgres \
 npm run test:load
 ```
 
-By default, it sends 1,000 comment deliveries at 100 per second, waits for active questions, then sends 1,000 email-message deliveries at that rate. Every fifth delivery duplicates the previous event. Expected totals are 800 conversations, 1,600 distinct events, 800 leads and 2,400 provider sends. The raised send budget belongs only to this fixture.
+Defaults send 1,000 comments at 100/sec, wait for questions, then 1,000 email messages at 100/sec. Every fifth delivery duplicates its predecessor. Expect 800 conversations, 1,600 distinct events, 800 leads and 2,400 provider sends. Only this fixture raises the send budget.
 
-Traffic enters `/webhooks/instagram` and exercises the normal pipeline. Startup is outside measurement. The generator shares the application process and dispatches on a fixed cadence with concurrent requests.
+Traffic enters `/webhooks/instagram`. Startup is excluded. The in-process generator dispatches concurrent requests on a fixed cadence.
 
-| Report field | What it measures |
+| Field | Read it as |
 |---|---|
-| `dispatchDeliveriesPerSecond` | Actual dispatch rate per phase |
-| `httpAcknowledgementP95Ms` | Dispatch through parsed HTTP 202 response |
-| `scheduledToAcknowledgementP95Ms` | Scheduled time through response |
-| `generatorScheduleLagP95Ms` | Scheduled time through actual dispatch |
-| `emailReceiptToRunCompletionP95Ms` | Persisted email receipt through completed run |
-| `loss` | Expected minus persisted distinct events |
-| `runsCompleted`, `runsFailed`, `unfinishedRuns` | Outcomes after bounded drain |
+| `dispatchDeliveriesPerSecond` | Actual dispatch rate for each phase |
+| `httpAcknowledgementP95Ms` | Dispatch to parsed HTTP 202 response |
+| `scheduledToAcknowledgementP95Ms` | Scheduled send time to response |
+| `generatorScheduleLagP95Ms` | How late the generator dispatched |
+| `emailReceiptToRunCompletionP95Ms` | Persisted email receipt to finished run |
+| `loss` | Expected distinct events minus persisted events |
+| `runsCompleted`, `runsFailed`, `unfinishedRuns` | Run outcomes when drain time ends |
 | `actualProviderSends`, `acceptedSendIntents` | Simulator effects and send-ledger totals |
-| `pendingOutbox` | Remaining commands and integration jobs |
+| `pendingOutbox` | Commands and integration jobs still queued |
 
-Passing requires all expected completions, exact deduplication, zero loss, matching send totals and an empty outbox. Failure exits nonzero. If scheduling lag climbs, the traffic generator itself is falling behind. Run this on your target hardware before using the numbers to size a deployment.
+Passing requires expected completions, exact deduplication, zero loss, matching send totals and an empty outbox. Failure exits nonzero. Rising schedule lag means generator overload. Size using target hardware.
+
+For smaller runs or saved reports, use these overrides.
 
 ```sh
 LOAD_RATE=25 LOAD_DELIVERIES=50 npm run test:load
 LOAD_REPORT_PATH=/tmp/blotato-load.json npm run test:load
 ```
 
-`LOAD_DRAIN_TIMEOUT_MS` defaults to 120,000 per phase. Default traffic lasts ten seconds per phase, followed by drain time within that limit.
+`LOAD_DRAIN_TIMEOUT_MS` defaults to 120,000 per phase. Default dispatch takes ten seconds per phase, then drain time. Inspect unfinished work on timeout.

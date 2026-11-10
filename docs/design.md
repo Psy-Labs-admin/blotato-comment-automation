@@ -2,82 +2,130 @@
 
 Someone comments “pricing”, gets a DM asking for their email, and replies straight away. Meanwhile, our worker is still on `await send()`. The person is already a whole message ahead of us.
 
-In the test, we hold the send acknowledgement for 1.5 seconds and slip the email into that gap. The API saves it as soon as it arrives. When the worker wakes up, the reply is there and the person gets their link. [The fast-reply test](../tests/failure-scenarios/races.test.ts)
+In the test, we hold the acknowledgement for 1.5 seconds and slip the email into that gap. The worker still sends exactly one link. Here’s what has to agree for that to work. [Fast-reply test](../tests/failure-scenarios/races.test.ts)
 
 <a id="1-the-promise"></a>
 <a id="2-product-contract"></a>
 
 ## The flow we support
 
-The brief puts the public reply first. “Sent you a DM!” is a bold thing to say one HTTP call before you actually send it. We’d go with “I’ll send the details privately.” Once the person replies with a usable email, the worker DMs the link. Success means Instagram accepted that last send.
+“Sent you a DM!” is a bold thing to say one HTTP call before you actually send it. The brief asks for the public reply first, so the rule keeps that order. “I’ll send the details privately” gives the private call some room to fail.
 
-`#Pricing!` matches. `pricingplan` doesn’t. We normalize Unicode and match whole words, ignoring case. A rule can cover all supported posts or just the media IDs you pick. Edits, our own comments and webhook echoes can't start a run.
+A rule can watch all supported posts or a list of media IDs. We normalize Unicode and match whole words, ignoring case. `#Pricing!` triggers the rule. `pricingplan` doesn’t. Edits, our own comments and webhook echoes can’t start a conversation.
 
-What if the same person comments on two posts a second apart? One run gets the conversation. The other trigger gets `conversation_busy`. For two rules matching one comment, priority wins, then automation ID breaks ties. The run releases the conversation after it finishes and every send settles. An accepted send starts the cooldown at release. [Why one run gets the reply](decisions/003-conversation-ownership.md)
+Two matching rules on one post? Priority wins, then automation ID breaks the tie. Two comments from the same person on the same account? While one run owns the conversation, a competing trigger gets `conversation_busy`. Ownership ends once the run finishes and its sends settle. An accepted send starts the cooldown at release. [Conversation ownership](decisions/003-conversation-ownership.md)
 
 <a id="3-how-general-is-the-engine-and-why"></a>
 
 ## A small engine on purpose
 
-A rule has up to ten steps drawn from `reply_comment`, `send_private_reply`, `await_input` and `send_message`. It gets at most one private reply and one email wait. The question goes right before the wait. Regular DMs follow it. A wait can last one second to 30 days, with up to three clarifications.
+A rule has up to ten steps. The pricing rule starts with `reply_comment`, asks through `send_private_reply`, pauses at `await_input` and finishes with `send_message`. The private question sits right before the wait. A regular DM needs a preceding wait. Each rule gets at most one private reply and one email wait, with a timeout from one second to 30 days and up to three clarifications.
 
-When someone asks “Why did I get that DM?” we can point to the exact step and rule version. Arbitrary loops and user code would make that conversation longer. To add a step, define its inputs, teach the workflow when to run it and write the activity that does the work. [Definition and validation](../src/domain/definition.ts)
+When someone asks “Why did I get that link?”, we can pull up the step and the published version that supplied it. That gets harder once rules can loop or execute arbitrary code. Adding a step here means defining its inputs, teaching the workflow when to call it and writing the activity that does the work. [Definition and validation](../src/domain/definition.ts)
 
 <a id="4-architecture"></a>
 
 ## Why Postgres and Temporal
 
-Suppose we redeploy while someone is looking up their email. Postgres has their conversation, rule version and send history. Temporal has the current step and the timer. The replacement worker picks up the wait. We considered doing the scheduling in Postgres too. That would leave us writing our own timer and crash recovery code. [Why we chose Temporal](decisions/001-durable-orchestration.md)
+Suppose we deploy while someone is typing their email. Postgres remembers the conversation, the original rule version and which sends we attempted. Temporal remembers where the run paused and when its timer expires. The replacement worker picks up the same wait. Doing the scheduling in Postgres too would give us a timer service of our own to debug. [Why we chose Temporal](decisions/001-durable-orchestration.md)
 
 ```mermaid
-flowchart LR
-    IG[Instagram] --> API[API]
-    API --> PG[(Postgres)]
-    PG <--> R[Relay]
-    R --> T[Temporal]
-    T <--> W[Worker]
-    W --> PG
-    W --> IG
-    R --> CRM[CRM and alerts]
+flowchart TB
+    accTitle: Services behind one Instagram conversation
+    accDescr: The API saves signed events to Postgres. The relay passes workflow commands to Temporal and delivers CRM and alert jobs. The worker reads and writes the send ledger and calls Instagram.
+    IG["Instagram"] -->|webhooks| API["Fastify API"]
+    UI["Console / client"] -->|rules, timelines| API
+    API -->|events, edits| PG[("Postgres")]
+    PG -->|outbox| R["Relay"]
+    R -->|start / signal| T["Temporal"]
+    T -->|tasks| W["Worker"]
+    W -->|send ledger| PG
+    W -->|reply / DM| IG
+    R -->|deliver| Dest["CRM / alerts"]
+    classDef role fill:#155e58,stroke:#278477,color:#fff
+    class API,R,W role
 ```
 
 <a id="6-execution-model"></a>
 
 ## Getting work into the workflow
 
-The API saves each incoming event with a sequence number before acknowledging it. Native callbacks verify Meta’s signature and leave routing to the relay. The signed gateway tries routing inline. A background sweep picks up anything still pending.
+The API saves an incoming event and assigns its sequence number before acknowledging it. Native callbacks verify Meta’s signature and leave routing to the relay. The signed gateway tries routing inline. A background sweep picks up anything still pending.
 
-One Postgres transaction claims the conversation, creates the run and puts “start this run” in the `outbox`. If the process crashes on the next line, the relay still has the command. Retries use the same Temporal workflow ID. Relays share work with leases and `SKIP LOCKED`. Signals and periodic checks wake the workflow to read Postgres.
+When a rule wins, one transaction claims the conversation, creates the run and queues its start command in the `outbox`. If the process dies just after commit, the relay still has the command. Relays lease jobs using `SKIP LOCKED`. On retry they use the same Temporal workflow ID. Signals wake the workflow to check Postgres. A timer covers a missed signal.
 
 <a id="8-waiting-for-input-boundary-deadline-and-races"></a>
 <a id="9-concurrency-summary"></a>
 
 ## Fast replies and other races
 
-Back to that fast typist. When the worker reserves the question, it records the last inbound sequence number and fixes the deadline. Replies get saved even while the HTTP call is in flight. Once Instagram confirms the send, the worker checks replies within those bounds.
+Before the private question leaves, the worker records the current inbox sequence number and fixes the deadline. That gives us a slice of inbox history to check once Instagram confirms the send.
 
-Say the person sends “yep” and then their email. By the time the worker wakes up, both messages are there. It reads the whole batch before deciding to ask again. The first reply with exactly one distinct valid address wins. That’s one lead even if two emails arrive. The timer checks the inbox before expiring the wait. An on-time reply still counts when the relay is late.
+```mermaid
+---
+config:
+  sequence:
+    width: 88
+    actorMargin: 20
+    mirrorActors: false
+---
+sequenceDiagram
+    accTitle: A reply arrives before the send acknowledgement
+    accDescr: While the worker is waiting for Instagram, the API can already store an incoming reply. The worker reads that reply once the question has been accepted.
+    participant W as Worker
+    participant P as Inbox
+    participant I as Instagram
+    W->>P: Set reply boundary
+    W->>I: Send question
+    I->>P: Email arrives via webhook
+    I-->>W: Send acknowledged
+    W->>P: Read reply, save lead
+    W->>I: DM the link
+```
+
+Say the person sends “yep” and follows up with their email. If both are waiting when the worker wakes, it reads the whole batch before asking for clarification. The first message with exactly one distinct valid address wins. Even two valid replies produce one lead. When the timer fires, it checks what arrived by the original deadline. A slow relay can’t make an on-time reply late.
 
 <a id="7-external-sends-the-ledger-protocol"></a>
 
 ## The send that might have happened
 
-Instagram accepts the DM. Our worker crashes before recording the response. An automatic retry would put a second, equally helpful copy of the pricing link in their inbox.
+Instagram accepts the DM. Our worker dies before recording the response. Sending it again feels reasonable right up until you look at the recipient’s inbox.
 
-The worker reserves an attempt, commits, then calls Instagram once. It records the result against that attempt. On restart, an accepted send is done. An interrupted call becomes `unknown` and holds the conversation open. A late acknowledgement can settle it before the next attempt.
+```mermaid
+flowchart TD
+    accTitle: How the next worker handles a lost DM receipt
+    accDescr: For an active run, a saved acceptance lets work continue. An unfinished attempt holds the conversation for evidence. An operator can authorize a retry only while the run is active.
+    L["Active run resumes and checks its ledger"] --> K{"What was saved?"}
+    K -->|Accepted| Next["Continue the run"]
+    K -->|Still in flight| Hold["Mark unknown and hold the conversation"]
+    Hold -->|Late acceptance or operator confirms| Next
+    Hold -->|Operator confirms no send| Retry["Allow one new attempt"]
+    classDef review fill:#ffedc2,stroke:#a77723,color:#322811
+    classDef done fill:#155e58,stroke:#278477,color:#fff
+    class Hold review
+    class Next done
+```
 
-We retry automatically when we know the send failed before it took effect. For an `unknown` send, the native connector has no lookup. The operator checks Instagram, records acceptance or authorizes one retry. [Crash tests](../tests/failure-scenarios/crash-and-unknown.test.ts) · [Send ledger decisions](decisions/002-external-send-guarantees.md)
+Every attempt gets its own record. The worker commits the reservation, calls Instagram once with the lock released, then records the result against that attempt. Proven transient non-sends can retry automatically. For an interrupted call, the native connector has no lookup that can tell us whether that particular DM landed. The operator checks Instagram and records the evidence. If the run has already ended, confirming a non-send cancels the intent. A finished run stays finished. [Crash tests](../tests/failure-scenarios/crash-and-unknown.test.ts) · [Send ledger decision](decisions/002-external-send-guarantees.md)
 
 <a id="5-data-model"></a>
 
 ## The records that matter
 
-| Question | Where to look |
-|---|---|
-| “Did we see this webhook twice?” | `inbox_events` deduplicates provider IDs per account. `conversations` keeps message order and the active owner. |
-| “Which rule promised that link?” | `automation_runs` pins the published version. Editing the rule changes future runs. `run_controls` records cancellation. |
-| “Which reply counted?” | `input_waits` stores the question boundary and deadline. `input_consumptions` records which event was used. `leads` links the captured address to its source reply. |
-| “Did we send it?” | `message_intents` identifies one logical send. `message_attempts` records each attempt and what we heard back. |
+Start at `automation_runs` when a reviewer asks where a link came from. Each run points to its conversation and the exact version it used. Follow the other direction to see what the run tried to send.
+
+```mermaid
+erDiagram
+    accTitle: Which database records belong to one run
+    accDescr: A run belongs to one conversation and one published version. It can capture at most one lead and can have several send intents. Each intent keeps its attempts.
+    conversations ||--o{ automation_runs : contains
+    automation_versions ||--o{ automation_runs : governs
+    automation_runs ||--o| leads : captures
+    automation_runs ||--o{ message_intents : requests
+    message_intents ||--o{ message_attempts : records
+```
+
+For a reply, follow the lead’s `source_event_id` back to `inbox_events`. Provider IDs deduplicate within an account. `input_waits` keeps the question boundary and deadline, and `input_consumptions` records which reply counted. [Database schema](../migrations/001_init.sql)
 
 <a id="10-instagram-constraints-and-anti-spam"></a>
 <a id="11-failure-modes"></a>
@@ -86,15 +134,15 @@ We retry automatically when we know the send failed before it took effect. For a
 
 ## Controls and recovery
 
-Before reserving a send, the worker checks cancellation, opt-out, takeover, account permissions, messaging windows and rate limits. A pause can defer a send for up to 24 hours. STOP records opt-out and cancellation together. A call already in flight may still land.
+A lot can change while a message is queued. Each send reservation checks cancellation, opt-out, takeover, account permissions, messaging windows and rate limits. A pause can defer a send for up to 24 hours. A participant’s STOP records opt-out and cancellation together. A call already in flight may still land.
 
-If the CRM is having a bad afternoon, the link DM can still go out. Saving the lead queues a separate CRM job. The relay retries it with the same idempotency key, which the receiver must honor. Exhausted retries show up in Operations. [Recovery playbooks](operations.md#incident-playbooks)
+If the CRM is having a bad afternoon, the link DM can still go out. Saving a lead queues a separate CRM job. The relay retries with the same idempotency key, which the receiver must honor. An exhausted job shows up in Operations with its history. [Recovery playbooks](operations.md#incident-playbooks)
 
 <a id="14-scale"></a>
 <a id="15-limitations-and-next-steps"></a>
 
 ## What still needs care
 
-A DM with an email could be answering a different question. A sequence number tells us which message came first. Only the person typing really knows what they meant.
+A sequence number tells us which message came first. It can’t tell us whether an email was the answer to some *other* question in the same inbox. A format check can’t tell us who owns the address either.
 
-Workflow changes have to replay old histories, including conversations still waiting for an answer. We use patches or pinned worker builds and test replay before rollout. Live Instagram delivery still needs an authorized account and public HTTPS. The [worker guide](worker-upgrades.md), [load check](observability.md#reproducible-load-check) and [Instagram setup](instagram.md) cover those details.
+A worker upgrade has to replay conversations that are still open. For a change in step order, we use patches or pinned builds and test old histories before rollout. For an actual comment-to-DM check, we need public HTTPS and an authorized professional Instagram account. [Worker upgrades](worker-upgrades.md) · [Load check](observability.md#reproducible-load-check) · [Instagram setup](instagram.md)

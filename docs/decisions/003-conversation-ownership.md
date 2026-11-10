@@ -2,10 +2,10 @@
 
 Accepted.
 
-Two “pricing” comments should not produce two questions competing for the same reply. An email arriving while the question is being sent needs a clear place to wait.
+Two pricing comments should not start questions competing for one reply. A reply can also arrive before the question's send is acknowledged.
 
-A conversation is one connected account and participant. Before touching a reply, a send or the end of a run, each worker locks that conversation’s row first. `owner_run_id` allows one active run. Competing triggers record `conversation_busy`. Matching rules use priority, then ID, to choose one winner.
+A conversation is one connected account and participant. Workers lock its row first for replies, send reservations and completion. `owner_run_id` admits one active run. Competing triggers record `conversation_busy`. Matching rules choose by priority, then automation ID.
 
-Ownership releases after the run finishes and every send settles. Unknown sends keep it held. Cooldown applies if Instagram accepted at least one send in the run. Cancellation, opt-out and takeover are checked at each send reservation.
+Ownership releases after completion and settled sends. Unknown sends hold it. Any accepted send starts cooldown at release. Each send reservation checks cancellation, opt-out and takeover.
 
-This serializes the awkward races without locking every participant together. It also means concurrent automations for one person are outside v1. Without a reliable reply reference, we still infer which question a DM answers.
+Other participants proceed independently, but concurrent automations for one person are outside v1. Busy triggers are recorded without queueing. Without reliable reply references, we still infer which question a DM answers. See the [walkthrough](../design.md).

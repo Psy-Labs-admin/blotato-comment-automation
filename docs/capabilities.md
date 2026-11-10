@@ -1,22 +1,26 @@
 # What can I do with a workspace?
 
+Turn keyword comments into conversations, capture emails and send links.
+
 ## Build a rule
 
-Start with a keyword, a public reply, a private question and a link. Save a partial draft, come back later, then publish it against a ready Instagram account. If two editors save at once, the second gets a revision conflict and can fetch the latest draft. Publishing a new version changes what the next person gets. Anyone already mid-conversation finishes on the old version. [Connect an account](instagram.md) · [Edit from your own admin](integration.md)
+Choose a keyword, public reply, private question and link. Save partial drafts, then publish against a ready Instagram account. If two editors save together, the second gets a revision conflict and must fetch the latest draft.
+
+New runs use the published version. Active conversations retain their starting version. [Connect an account](instagram.md) · [Edit from your own admin](integration.md)
 
 ## Follow a conversation
 
-A comment like “Pricing?” matches the whole word `pricing`. If two rules match, priority picks the winner. While one run owns the conversation, a second comment can't start a competing one. A fast reply still counts if it arrives while Instagram is acknowledging the private question. The run can ask for clarification or time out if the person never sends a usable address. [Matching and reply handling](design.md)
+“Pricing?” matches the whole word `pricing`. Priority chooses between matching rules. While one run owns the conversation, another comment cannot start a competing run. Replies count even while Instagram acknowledges the question. The run can ask for clarification or time out without a usable email. [Matching and reply handling](design.md)
 
-Open the run timeline to see which rule won, whether the reply contained a usable email and which sends Instagram accepted. Acceptance is as far as we can see. A correctly formatted address creates a lead and queues a CRM update. A CRM outage doesn't hold up the link DM. Email ownership and marketing consent need their own checks. [Leads API](integration.md)
+The timeline shows which rule won, email validation and sends Instagram accepted. Acceptance cannot prove someone read the message. A correctly formatted email creates a lead and queues a CRM update. A CRM outage does not delay the link DM. Check email ownership and marketing consent separately. [Leads API](integration.md)
 
 ## Stop or recover a run
 
 | What you need | What happens |
 |---|---|
-| Disable a rule | Stops new runs. Existing ones can finish. |
-| Pause an account | Holds eligible sends until you resume or their window expires. |
-| Take over a conversation | Cancels its active run and blocks new ones until you release it. A participant's STOP also blocks future automated sends. |
-| Resolve an uncertain DM | Check Instagram, then record acceptance or authorize one retry. An in-flight call can still succeed. |
+| Disable a rule | Stops new runs. Existing runs can finish. |
+| Pause an account | Holds eligible sends until resumed or their window expires. |
+| Take over a conversation | Cancels its run and blocks new runs until released. A participant's STOP also blocks future automated sends. |
+| Resolve an uncertain DM | Check Instagram, then record the outcome. Confirming a non-send allows an active run one retry. A finished run stays closed. |
 
-Operations also shows stuck CRM jobs, missing post details and worker health. You can route grouped incidents to Telegram and see whether Telegram accepted the alert. [Recovery steps](operations.md) · [Telegram setup](telegram.md)
+Operations shows CRM failures, missing post details and worker health. Route grouped incidents to Telegram and check alert acceptance. [Recovery steps](operations.md) · [Telegram setup](telegram.md)

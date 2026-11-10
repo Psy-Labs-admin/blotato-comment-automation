@@ -3,7 +3,7 @@
   "info": {
     "title": "Blotato Automation API",
     "version": "1.0.0",
-    "description": "Connect your backend with a workspace key. Read keys can list runs and leads. Use a write key to edit, publish or pause a rule. Each key works in one workspace."
+    "description": "Call this API from your backend. A read key lets you follow runs and collect leads from one workspace. A write key also lets you edit and publish its rules."
   },
   "servers": [
     {
@@ -19,27 +19,27 @@
   "tags": [
     {
       "name": "Workspace",
-      "description": "Which workspace does this key open?"
+      "description": "Find the workspace your key belongs to."
     },
     {
       "name": "Accounts",
-      "description": "Check which Instagram accounts can publish."
+      "description": "Pick an Instagram account that’s ready to run your rule."
     },
     {
       "name": "Drafts",
-      "description": "Save a rule, edit it and publish a revision."
+      "description": "Save work in progress and publish it when it’s ready."
     },
     {
       "name": "Automations",
-      "description": "Turn published rules on or off."
+      "description": "Choose which published rules can start conversations."
     },
     {
       "name": "Runs",
-      "description": "See what happened after a comment matched."
+      "description": "Follow a conversation from its first comment to the last recorded step."
     },
     {
       "name": "Leads",
-      "description": "Get captured email addresses and check CRM delivery."
+      "description": "Read captured addresses and see which ones reached the CRM."
     }
   ],
   "paths": {
@@ -87,7 +87,7 @@
           "Accounts"
         ],
         "summary": "List Instagram accounts",
-        "description": "Includes disconnected accounts. Check canPublish and issue before choosing an account for a rule.",
+        "description": "Disconnected accounts stay in this list. Use canPublish and issue to choose an account for a rule.",
         "x-required-permission": "read",
         "responses": {
           "200": {
@@ -162,7 +162,7 @@
           "Drafts"
         ],
         "summary": "Create an automation draft",
-        "description": "Send one Idempotency-Key per intended draft. If the response is lost, retry with the same key and body. You get the original revision-1 response even after an edit or API key rotation. Each call needs a valid write key. The workspace keeps successful keys indefinitely. Changed input returns 409 idempotency_conflict. A failed create leaves the key available. Without the header each call creates a new draft.",
+        "description": "Give each new draft an Idempotency-Key. Lost the response? Send the same key and body again to get the original revision-1 response, even after an edit or credential rotation. Each call needs a valid write key for this workspace. Successful keys stay reserved indefinitely. Changing the input returns 409 idempotency_conflict. A failed create leaves the key available. Omitting the header creates a new draft on every call.",
         "x-required-permission": "write",
         "responses": {
           "201": {
@@ -292,7 +292,7 @@
           "Drafts"
         ],
         "summary": "Update an automation draft",
-        "description": "Send the current expectedRevision. Each save bumps the revision. Fields you leave out keep their values. Sending content replaces the whole object. Set connectionId to null to clear the account. If the response goes missing or you get a revision_conflict, fetch the draft before trying again.",
+        "description": "Use the current expectedRevision. Each save bumps it. Leave fields out to keep them, or set connectionId to null to remove the account. If you send content, include the whole content object. After a lost response or a revision_conflict, fetch the draft before trying again.",
         "x-required-permission": "write",
         "responses": {
           "200": {
@@ -361,7 +361,7 @@
           "Drafts"
         ],
         "summary": "Publish a draft revision",
-        "description": "Publishing checks the rule and account, freezes a version and turns the rule on. If the response goes missing, fetch the draft. Publishing the same unchanged revision again returns the original version, even if the rule was later disabled. An edit makes the older revision stale.",
+        "description": "Publish checks the rule and account, saves a fixed version and enables new runs. If the response gets lost, fetch the draft first. Repeating a publish for the same unchanged revision returns its version and preserves any later decision to disable the rule. Editing the draft makes the old revision stale.",
         "x-required-permission": "write",
         "responses": {
           "200": {
@@ -420,7 +420,7 @@
           "Automations"
         ],
         "summary": "List published automations",
-        "description": "Includes disabled rules that have a published version.",
+        "description": "Disabled rules stay in this list as long as they have a published version.",
         "x-required-permission": "read",
         "responses": {
           "200": {
@@ -505,7 +505,7 @@
           "Automations"
         ],
         "summary": "Enable a published automation",
-        "description": "Checks that the account is ready before turning the rule on. Safe to repeat.",
+        "description": "Turn the rule on after checking the account is ready. You can safely repeat this call.",
         "x-required-permission": "write",
         "responses": {
           "200": {
@@ -562,7 +562,7 @@
           "Automations"
         ],
         "summary": "Disable a published automation",
-        "description": "Stops new runs. Anyone already in a conversation can finish on the version they started with. Safe to repeat.",
+        "description": "Close the rule to new runs. Conversations already under way keep their original version. You can safely repeat this call.",
         "x-required-permission": "write",
         "responses": {
           "200": {
@@ -619,7 +619,7 @@
           "Runs"
         ],
         "summary": "List automation runs",
-        "description": "Use needsReview to find runs where a send still needs a decision.",
+        "description": "Set needsReview to true to find sends waiting for an operator’s decision.",
         "x-required-permission": "read",
         "responses": {
           "200": {
@@ -723,7 +723,7 @@
           "Runs"
         ],
         "summary": "See what happened in a run",
-        "description": "Events appear in time order. Acceptance means Instagram took the request. Delivery is a separate question. An uncertain send stays on hold until it can be resolved.",
+        "description": "Read the events in time order. An accepted send means Instagram took the request. If a receipt goes missing, the run holds the send for review.",
         "x-required-permission": "read",
         "responses": {
           "200": {
@@ -766,7 +766,7 @@
           "Leads"
         ],
         "summary": "List captured leads",
-        "description": "Returns captured addresses and their CRM status. We check email format. Ownership is unverified.",
+        "description": "Read each captured address and its CRM status. Addresses have passed an email format check. Ownership still needs verification.",
         "x-required-permission": "read",
         "responses": {
           "200": {

@@ -2,10 +2,10 @@
 
 Accepted.
 
-Instagram may accept a message just before our worker loses the response. Retrying could duplicate it. Recording success before the call could hide a lost message. Neither gives us a trustworthy timeline.
+Instagram accepts a DM, then the response disappears. Retrying may duplicate it. Recording success before calling may hide a lost message.
 
-Each logical send has one ledger entry and separate attempts. The worker reserves an attempt under the conversation lock, commits, then calls Instagram once. The result belongs to that attempt. After a crash, the next worker checks the ledger. An accepted send is done. A call interrupted halfway through lands in `unknown`. We retry automatically only when we know the message didn’t go out.
+Each logical send has a ledger entry and separate attempts. Under the conversation lock, the worker reserves and commits an attempt, calls once, then records its result. Recovery leaves accepted sends complete and interrupted calls `unknown`. Automatic retries require evidence the send never took effect.
 
-An unknown send ties up the conversation and opens an incident. A late acceptance, supported provider lookup or audited operator decision can settle it. Native Instagram has no configured lookup. An operator can authorize one new attempt, with a real duplicate risk if the original arrived.
+Unknown sends hold ownership and open an incident. Late acceptance, supported lookup or an [audited operator decision](../operations.md#send_outcome_unknown) can settle them. Native Instagram has no configured lookup. For an active run, an operator can authorize one new attempt. Bad evidence can still mean a second DM.
 
-This costs human attention when evidence runs out. It also keeps uncertainty visible. Temporal retries alone cannot tell us what Instagram received.
+This costs human attention and stalls progress when evidence runs out. Temporal retries cannot establish what Instagram received.

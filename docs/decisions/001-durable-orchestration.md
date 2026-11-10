@@ -2,10 +2,10 @@
 
 Accepted.
 
-A person can take days to answer. The run needs to survive a restart, remember its deadline and resume the right step. Two workers still need to agree on who owns the conversation, which reply counted and who gets to send.
+Someone takes two days to answer the pricing question. A deployment must preserve their deadline, rule version and next step.
 
-Each run gets a Temporal workflow. The worker checks Postgres before acting on a reply or a send. When we create a run, we write its start command in the same transaction. If the process dies before telling Temporal, the relay picks up the saved command.
+Temporal workflows own durable waits, timers and progress. Postgres holds conversation ownership, rule versions, replies and send history. Creating a run also saves its start command transactionally, so the outbox relay can deliver it after a crash.
 
-A Postgres scheduler would save a service, then charge us in timer recovery, leases and inspection tools. A queue would spread the conversation state across consumers. Temporal already handles that work.
+A Postgres scheduler would save a service but require timer recovery, leases and inspection tools. A queue would scatter conversation progress across consumers.
 
-The cost is another service and deterministic workflow code. Changes need replay tests and patches or pinned worker deployments. The database still enforces the identities and constraints that keep retries safe.
+We accept another service and deterministic workflow code. Changes need replay tests and patches or compatible [pinned builds](../worker-upgrades.md). Database constraints still protect ownership and retry safety. Temporal cannot make an Instagram call atomic with a database commit.
