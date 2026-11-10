@@ -7,6 +7,8 @@ export const Reason = {
   STARTED: 'started',
   NO_MATCH: 'no_match',
   LOWER_PRIORITY: 'lower_priority',
+  EXACT_MATCH_PREFERRED: 'exact_match_preferred',
+  AMBIGUOUS_KEYWORD: 'ambiguous_keyword',
   CONVERSATION_BUSY: 'conversation_busy',
   COOLDOWN: 'cooldown',
   OPTED_OUT: 'opted_out',

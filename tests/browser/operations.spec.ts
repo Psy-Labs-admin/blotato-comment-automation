@@ -36,6 +36,7 @@ test("first use saves a real draft across reload on desktop and mobile", async (
     .click();
   await page.getByLabel("Name", { exact: true }).fill("Comment follow-up");
   await page.getByLabel("Keyword or phrase").fill("information");
+  await expect(page.getByRole("checkbox", { name: "Allow simple typos" })).not.toBeChecked();
   const saved = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
@@ -49,6 +50,17 @@ test("first use saves a real draft across reload on desktop and mobile", async (
     "Comment follow-up",
   );
   await expect(page.getByLabel("Keyword or phrase")).toHaveValue("information");
+  await expect(page.getByRole("checkbox", { name: "Allow simple typos" })).not.toBeChecked();
+  expect((await workspace.data.db.query("SELECT content FROM automation_drafts")).rows[0].content)
+    .not.toHaveProperty("allowKeywordTypos");
+  await page.getByLabel("Name", { exact: true }).fill("Comment follow-up updated");
+  const updated = page.waitForResponse((response) => response.request().method() === "PATCH");
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
+  expect((await updated).ok()).toBe(true);
+  await page.reload();
+  await expect(page.getByRole("checkbox", { name: "Allow simple typos" })).not.toBeChecked();
+  expect((await workspace.data.db.query("SELECT content FROM automation_drafts")).rows[0].content)
+    .not.toHaveProperty("allowKeywordTypos");
   await expect(
     page.getByRole("button", { name: "Publish automation", exact: true }),
   ).toBeDisabled();
@@ -68,6 +80,86 @@ test("first use saves a real draft across reload on desktop and mobile", async (
   ).toBe(0);
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
   await expect(page.getByLabel("Access key", { exact: true })).toBeVisible();
+});
+
+test("keyword typo matching is opt-in and persists on and off across editing", async ({
+  page,
+  workspace,
+}, info) => {
+  await workspace.signIn(page);
+  await page.getByRole("button", { name: "Create automation", exact: true }).click();
+  await page.getByLabel("Name", { exact: true }).fill("Pricing follow-up");
+  await page.getByLabel("Keyword or phrase").fill("pricing");
+  const typos = page.getByRole("checkbox", { name: "Allow simple typos" });
+  await expect(typos).not.toBeChecked();
+  await expect(typos).toHaveAccessibleDescription(/“prcing” or “pricign” for “pricing”/);
+  await typos.check();
+  await page.screenshot({ path: info.outputPath("keyword-typos-desktop.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.evaluate("document.documentElement.scrollWidth <= innerWidth")).resolves.toBe(true);
+  await page.screenshot({ path: info.outputPath("keyword-typos-mobile.png"), fullPage: true });
+  const save = async () => {
+    const response = page.waitForResponse((result) =>
+      ["POST", "PATCH"].includes(result.request().method()) &&
+      /^\/operator\/automations(?:\/[^/]+)?$/.test(new URL(result.url()).pathname));
+    await page.getByRole("button", { name: "Save draft", exact: true }).click();
+    expect((await response).ok()).toBe(true);
+    await expect(page.getByText("Draft saved.", { exact: true })).toBeVisible();
+  };
+  await save();
+  await page.reload();
+  await expect(typos).toBeChecked();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByLabel("Name", { exact: true }).fill("Pricing follow-up updated");
+  await save();
+  await page.reload();
+  await expect(typos).toBeChecked();
+  expect((await workspace.data.db.query("SELECT content FROM automation_drafts")).rows[0].content.allowKeywordTypos).toBe(true);
+  await typos.uncheck();
+  await save();
+  await page.reload();
+  await expect(typos).not.toBeChecked();
+  expect((await workspace.data.db.query("SELECT content FROM automation_drafts")).rows[0].content.allowKeywordTypos).toBe(false);
+});
+
+test("existing custom automations remain read-only without a typo setting", async ({
+  page,
+  workspace,
+}) => {
+  const { db } = workspace.data;
+  const connectionId = await createConnection(db, { tenantId: workspace.tenantId, accountId: "custom-greeting" });
+  await db.query("UPDATE social_connections SET integration_kind='gateway',verified_at=now() WHERE id=$1", [connectionId]);
+  const definition = {
+    schemaVersion: 1,
+    trigger: { type: "comment.created", platform: "instagram", keyword: "hello", match: "whole_word_case_insensitive", posts: "all_supported" },
+    steps: [{ id: "hello", type: "reply_comment", text: "Hello there" }],
+  };
+  const rule = await createAutomation(db, { tenantId: workspace.tenantId, connectionId }, definition, { name: "Custom greeting" });
+  await workspace.signIn(page);
+  await page.getByRole("button", { name: /Custom greeting/ }).click();
+  await expect(page.getByText("This automation uses a custom sequence. Its published definition is preserved.")).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: "Allow simple typos" })).toBeHidden();
+  await expect(page.getByRole("button", { name: "Save draft", exact: true })).toBeHidden();
+  expect((await db.query("SELECT count(*)::int AS n FROM automation_drafts WHERE automation_id=$1", [rule.automationId])).rows[0].n).toBe(0);
+});
+
+test("conversation history explains a real typo match", async ({ page, workspace }) => {
+  const { db } = workspace.data;
+  const accountId = "typo-history";
+  const connectionId = await createConnection(db, { tenantId: workspace.tenantId, accountId });
+  await db.query("UPDATE social_connections SET integration_kind='gateway',verified_at=now() WHERE id=$1", [connectionId]);
+  await createAutomation(db, { tenantId: workspace.tenantId, connectionId }, {
+    schemaVersion: 1,
+    trigger: { type: "comment.created", platform: "instagram", keyword: "pricing", match: "whole_word_with_typos", posts: "all_supported" },
+    steps: [{ id: "reply", type: "reply_comment", text: "Thanks for asking" }],
+  });
+  const stored = await ingestEvent({ db, clock: systemClock }, commentEvent({ accountId, from: "typo-person", text: "prcing please" }));
+  if (stored.status !== "accepted") throw new Error("Test event was not accepted");
+  const decision = await routeEvent({ db, clock: systemClock }, stored.eventId);
+  expect(decision.runId).toBeTruthy();
+  await workspace.signIn(page, "#run=" + decision.runId);
+  await expect(page.getByRole("region", { name: "Conversation history" }))
+    .toContainText('Rule "pricing" matched with typo tolerance; published version 1 started');
 });
 
 test("native disconnect requires confirmation and preserves gateway accounts", async ({

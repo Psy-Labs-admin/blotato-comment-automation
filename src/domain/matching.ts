@@ -7,21 +7,82 @@ export function tokenize(text: string): string[] {
     .filter(Boolean);
 }
 
-/**
- * Whole-word, case-insensitive match. A multi-word keyword must appear as a contiguous phrase.
- * "#Pricing!" matches "pricing"; "pricingplan" does not.
- */
-export function matchesKeyword(text: string, keyword: string): boolean {
-  const words = tokenize(text);
-  const needle = tokenize(keyword);
-  if (needle.length === 0) return false;
-  outer: for (let i = 0; i + needle.length <= words.length; i++) {
-    for (let j = 0; j < needle.length; j++) {
-      if (words[i + j] !== needle[j]) continue outer;
-    }
-    return true;
+/** Returns the removed character's index, or null unless the strings differ by one removal. */
+function removedLetter(longer: readonly string[], shorter: readonly string[]): number | null {
+  let index = 0;
+  while (index < shorter.length && longer[index] === shorter[index]) index++;
+  for (let i = index; i < shorter.length; i++) {
+    if (longer[i + 1] !== shorter[i]) return null;
   }
-  return false;
+  return index;
+}
+
+function wordScript(word: string): 'latin' | 'cyrillic' | null {
+  if (!/^\p{L}+$/u.test(word)) return null;
+  if (/^\p{Script=Latin}+$/u.test(word)) return 'latin';
+  if (/^\p{Script=Cyrillic}+$/u.test(word)) return 'cyrillic';
+  return null;
+}
+
+/** One conservative typing error; each scan is linear in the word length. */
+function isWordTypo(word: string, keyword: string): boolean {
+  // One Unicode letter uses at most two UTF-16 code units. Avoid scanning long unrelated tokens.
+  if (keyword.length < 6 || Math.abs(keyword.length - word.length) > 2) return false;
+  const script = wordScript(keyword);
+  if (!script || wordScript(word) !== script) return false;
+  const expected = Array.from(keyword);
+  const actual = Array.from(word);
+  if (expected.length < 6) return false;
+
+  if (actual.length === expected.length + 1) {
+    const extra = removedLetter(actual, expected);
+    // Only an extra consecutive copy of a letter is allowed, including at either edge.
+    return extra !== null && (actual[extra] === actual[extra - 1] || actual[extra] === actual[extra + 1]);
+  }
+  if (actual.length === expected.length - 1) {
+    if (actual[0] !== expected[0] || actual[actual.length - 1] !== expected[expected.length - 1]) return false;
+    // Repeated edge letters must not make an edge deletion look like an interior deletion.
+    if (keyword.slice(expected[0].length) === word || keyword.slice(0, -expected[expected.length - 1].length) === word) return false;
+    const missing = removedLetter(expected, actual);
+    return missing !== null && missing > 0 && missing < expected.length - 1;
+  }
+  if (actual.length !== expected.length) return false;
+  let index = 0;
+  while (index < expected.length && actual[index] === expected[index]) index++;
+  if (index + 1 >= expected.length) return false;
+  if (actual[index] !== expected[index + 1] || actual[index + 1] !== expected[index]) return false;
+  for (let i = index + 2; i < expected.length; i++) {
+    if (actual[i] !== expected[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Classifies contiguous whole-token phrases in already-tokenized comment words.
+ * Exact occurrences always win. Typo matching permits one altered word in the entire phrase.
+ */
+export function classifyKeywordMatch(
+  words: readonly string[], keyword: string, allowTypos: boolean,
+): 'exact' | 'typo' | null {
+  const needle = tokenize(keyword);
+  if (needle.length === 0) return null;
+  let foundTypo = false;
+  outer: for (let i = 0; i + needle.length <= words.length; i++) {
+    let altered = false;
+    for (let j = 0; j < needle.length; j++) {
+      if (words[i + j] === needle[j]) continue;
+      if (!allowTypos || altered || !isWordTypo(words[i + j], needle[j])) continue outer;
+      altered = true;
+    }
+    if (!altered) return 'exact';
+    foundTypo = true;
+  }
+  return foundTypo ? 'typo' : null;
+}
+
+/** Whole-word, case-insensitive exact matching; multi-word keywords are contiguous phrases. */
+export function matchesKeyword(text: string, keyword: string): boolean {
+  return classifyKeywordMatch(tokenize(text), keyword, false) === 'exact';
 }
 
 export type EmailExtraction =

@@ -64,7 +64,7 @@ function describe(a: any, label: string, run: any): string | null {
   const d = a.data ?? {};
   switch (a.type) {
     case 'run.created':
-      return `Rule "${run.definition.trigger.keyword}" matched; published version ${d.version ?? run.version} started`;
+      return `Rule "${run.definition.trigger.keyword}" matched${d.matchKind === 'typo' ? ' with typo tolerance' : ''}; published version ${d.version ?? run.version} started`;
     case 'send.attempt_started':
       return `${label}: attempt ${d.attemptNo} reserved`;
     case 'send.accepted':

@@ -1,6 +1,6 @@
 # Instagram comment automations
 
-Someone comments “pricing” on an Instagram post. The account replies in public, asks for an email in private, then DMs the link. What if the person types faster than Instagram can confirm it sent the question? We have a test for that. [Fast-reply test](tests/failure-scenarios/races.test.ts) · [System diagram](docs/design.md#why-postgres-and-temporal)
+Someone comments “pricing” on an Instagram post. The account replies in public, asks for an email in private, then DMs the link. What if the person types faster than Instagram can confirm it sent the question? We have a test for that. And if they typed `prcing` in the first place, the rule can catch it. [Keyword matching](docs/design.md#when-someone-types-prcing) · [Fast-reply test](tests/failure-scenarios/races.test.ts) · [System diagram](docs/design.md#why-postgres-and-temporal)
 
 ```mermaid
 flowchart TD

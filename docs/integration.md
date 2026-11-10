@@ -51,6 +51,8 @@ node examples/external-admin.mjs --create-draft "Pricing replies"
 
 Keep `draftId` and `revision`. Authorize local Swagger and edit through `PATCH /drafts/{id}`. Its example body is editable. Sending `content` replaces the whole object. A name-only edit to a fresh draft takes `{"expectedRevision":1,"name":"Pricing replies v2"}`. Use each save's returned revision for the next edit or publish.
 
+To match `prcing` as well as `pricing`, include `allowKeywordTypos: true` inside the draft’s `content` and publish that revision. Omitted or false keeps exact matching. A matching timeline entry tells you when the typo setting made the difference. [Examples and tie handling](design.md#when-someone-types-prcing)
+
 API-only installations can save drafts. Publication needs configured dispatch and a verified, publishable [Instagram connection](instagram.md). From `GET /accounts`, use internal `id` as `connectionId`. The separate `accountId` identifies Instagram's account.
 
 Call `POST /drafts/{id}/publish` with the current revision. Keep the draft ID for edits and `automationId` for enable/disable. Publication returns immutable `versionId` and numeric `version`. Disabling stops future matches. Active conversations retain their starting version.

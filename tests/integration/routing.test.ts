@@ -8,6 +8,8 @@ import { routeEvent, routePending } from '../../src/ingest/router';
 import { finalizeRun } from '../../src/activities/runs';
 import { systemClock } from '../../src/domain/clock';
 import { Reason } from '../../src/domain/reasons';
+import { buildTimeline } from '../../src/timeline';
+import { createConnection } from '../helpers/account';
 
 describe('ingest and routing', () => {
   let t: Awaited<ReturnType<typeof createTestDb>>;
@@ -86,6 +88,99 @@ describe('ingest and routing', () => {
       [tn.tenantId, Reason.LOWER_PRIORITY],
     );
     expect(loser.rows[0].data.automationId).toBe(low.automationId);
+  });
+
+  function typoDefinition(keyword = 'pricing') {
+    const def = pricingWith({ keyword });
+    def.trigger.match = 'whole_word_with_typos';
+    return def;
+  }
+
+  it('typo matching requires opt-in; opted-in routing is deduplicated and explained in the timeline', async () => {
+    const tn = await seedTenant(db);
+    const rule = await createAutomation(db, tn);
+    expect((await deliver(commentEvent({ accountId: tn.accountId, from: 'strict_typo', text: 'prcing please' }))).route!.outcome).toBe(Reason.NO_MATCH);
+    await db.query(`UPDATE automation_versions SET definition = $2 WHERE automation_id = $1`, [rule.automationId, typoDefinition()]);
+    const ev = commentEvent({ accountId: tn.accountId, from: 'typo_dedup', text: 'prcing please' });
+    const results = await Promise.all(Array.from({ length: 5 }, () => deliver(ev)));
+    const runId = results[0].route!.runId!;
+    expect(results.every((r) => r.route!.outcome === Reason.STARTED && r.route!.runId === runId)).toBe(true);
+    expect(await count(`SELECT count(*) n FROM outbox WHERE tenant_id = $1 AND kind = 'workflow.start'`, [tn.tenantId])).toBe(1);
+    const created = (await db.query(`SELECT data FROM run_audit_events WHERE run_id = $1 AND type = 'run.created'`, [runId])).rows;
+    expect(created).toHaveLength(1);
+    expect(created[0].data.matchKind).toBe('typo');
+    expect(JSON.stringify(created)).not.toContain(ev.text);
+    const timeline = await buildTimeline(db, tn.tenantId, runId);
+    expect(timeline!.find((e) => e.type === 'run.created')!.text).toContain('matched with typo tolerance');
+    const exact = await deliver(commentEvent({ accountId: tn.accountId, from: 'opted_in_exact' }));
+    const exactAudit = (await db.query(`SELECT data FROM run_audit_events WHERE run_id = $1 AND type = 'run.created'`, [exact.route!.runId])).rows[0];
+    expect(exactAudit.data.matchKind).toBeUndefined();
+    expect((await buildTimeline(db, tn.tenantId, exact.route!.runId!))!.find((e) => e.type === 'run.created')!.text).toBe('Rule "pricing" matched; published version 1 started');
+  });
+
+  it('an exact match beats higher-priority typo matches and preserves priority/ID ordering among exact rules', async () => {
+    const tn = await seedTenant(db);
+    const fuzzy = await createAutomation(db, tn, typoDefinition('pricing'), { priority: 100 });
+    const low = await createAutomation(db, tn, pricingWith({ keyword: 'prcing' }), { priority: 1 });
+    const a = await createAutomation(db, tn, pricingWith({ keyword: 'prcing' }), { priority: 5 });
+    const b = await createAutomation(db, tn, pricingWith({ keyword: 'prcing' }), { priority: 5 });
+    const winnerId = [a.automationId, b.automationId].sort()[0];
+    const { route } = await deliver(commentEvent({ accountId: tn.accountId, from: 'exact_preferred', text: 'prcing' }));
+    expect((await db.query(`SELECT automation_id FROM automation_runs WHERE id = $1`, [route!.runId])).rows[0].automation_id).toBe(winnerId);
+    const audit = (await db.query(`SELECT reason, data FROM run_audit_events WHERE tenant_id = $1 AND type = 'automation.not_selected'`, [tn.tenantId])).rows;
+    expect(audit).toHaveLength(3);
+    expect(audit.find((r) => r.data.automationId === fuzzy.automationId).reason).toBe(Reason.EXACT_MATCH_PREFERRED);
+    expect(audit.find((r) => r.data.automationId === low.automationId).reason).toBe(Reason.LOWER_PRIORITY);
+    expect(audit.filter((r) => r.reason === Reason.LOWER_PRIORITY)).toHaveLength(2);
+  });
+
+  it('multiple eligible typo rules are ambiguous regardless of priority and never start or enqueue', async () => {
+    const tn = await seedTenant(db);
+    await createAutomation(db, tn, typoDefinition(), { priority: 1 });
+    await createAutomation(db, tn, typoDefinition(), { priority: 100 });
+    const ev = commentEvent({ accountId: tn.accountId, from: 'ambiguous_typo', text: 'prcing please' });
+    const first = await deliver(ev);
+    expect(first.route).toMatchObject({ outcome: Reason.AMBIGUOUS_KEYWORD, runId: null });
+    expect((await deliver(ev)).route).toMatchObject({ outcome: Reason.AMBIGUOUS_KEYWORD, alreadyRouted: true });
+    expect(await count(`SELECT count(*) n FROM automation_runs WHERE tenant_id = $1`, [tn.tenantId])).toBe(0);
+    expect(await count(`SELECT count(*) n FROM outbox WHERE tenant_id = $1 AND kind LIKE 'workflow.%'`, [tn.tenantId])).toBe(0);
+    expect(await count(`SELECT count(*) n FROM message_intents WHERE tenant_id = $1`, [tn.tenantId])).toBe(0);
+    const audit = (await db.query(`SELECT reason, data FROM run_audit_events WHERE tenant_id = $1`, [tn.tenantId])).rows;
+    expect(audit).toEqual([{ reason: Reason.AMBIGUOUS_KEYWORD, data: { matchKind: 'typo', candidateCount: 2 } }]);
+  });
+
+  it('post, active status, account and tenant scope are applied before resolving typo ambiguity', async () => {
+    const tn = await seedTenant(db);
+    const other = await seedTenant(db);
+    const connectionId = await createConnection(db, { tenantId: tn.tenantId, accountId: 'another_typo_account' });
+    await db.query(`UPDATE social_connections SET verified_at = now(), integration_kind = 'gateway' WHERE id = $1`, [connectionId]);
+    await createAutomation(db, { tenantId: tn.tenantId, connectionId }, typoDefinition());
+    await createAutomation(db, other, typoDefinition());
+    const filtered = typoDefinition();
+    filtered.trigger.posts = { mediaIds: ['only_other_post'] } as any;
+    await createAutomation(db, tn, filtered);
+    const disabled = await createAutomation(db, tn, typoDefinition());
+    await db.query(`UPDATE automations SET status = 'disabled' WHERE id = $1`, [disabled.automationId]);
+    expect((await deliver(commentEvent({ accountId: tn.accountId, from: 'no_eligible_typo', text: 'prcing' }))).route!.outcome).toBe(Reason.NO_MATCH);
+    const eligible = await createAutomation(db, tn, typoDefinition());
+    const { route } = await deliver(commentEvent({ accountId: tn.accountId, from: 'scoped_typo', text: 'prcing' }));
+    expect(route!.outcome).toBe(Reason.STARTED);
+    expect((await db.query(`SELECT automation_id FROM automation_runs WHERE id = $1`, [route!.runId])).rows[0].automation_id).toBe(eligible.automationId);
+  });
+
+  it('typo matches retain connection and conversation suppression policies', async () => {
+    const tn = await seedTenant(db);
+    await createAutomation(db, tn, typoDefinition());
+    const ev = (from: string) => commentEvent({ accountId: tn.accountId, from, text: 'prcing' });
+    await db.query(`UPDATE social_connections SET sends_paused = true WHERE id = $1`, [tn.connectionId]);
+    expect((await deliver(ev('paused_typo'))).route!.outcome).toBe(Reason.SENDS_PAUSED);
+    await db.query(`UPDATE social_connections SET sends_paused = false WHERE id = $1`, [tn.connectionId]);
+    expect((await deliver(ev('busy_typo'))).route!.outcome).toBe(Reason.STARTED);
+    expect((await deliver(ev('busy_typo'))).route!.outcome).toBe(Reason.CONVERSATION_BUSY);
+    expect(await count(`SELECT count(*) n FROM outbox WHERE tenant_id = $1 AND kind = 'workflow.start'`, [tn.tenantId])).toBe(1);
+    const suppressed = (await db.query(`SELECT data FROM run_audit_events WHERE tenant_id = $1 AND type = 'trigger.suppressed'`, [tn.tenantId])).rows;
+    expect(suppressed).toHaveLength(2);
+    expect(suppressed.every((a) => a.data.matchKind === 'typo')).toBe(true);
   });
 
   it('a new trigger within the cooldown after a finished run is suppressed', async () => {

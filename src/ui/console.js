@@ -1279,6 +1279,7 @@
     const data = draft?.content || {};
     byId("automation-name").value = draft?.name || "";
     byId("keyword").value = data.keyword || "";
+    byId("allow-keyword-typos").checked = data.allowKeywordTypos === true;
     byId("public-reply").value = data.publicReply || "";
     byId("email-prompt").value = data.emailPrompt || "";
     byId("link-text").value = data.linkText || "";
@@ -1328,6 +1329,9 @@
       if (value) contentValues[name] = value;
     }
     const timeout = byId("timeout").value;
+    const allowKeywordTypos = byId("allow-keyword-typos").checked;
+    if (allowKeywordTypos || currentDraft?.content?.allowKeywordTypos !== undefined)
+      contentValues.allowKeywordTypos = allowKeywordTypos;
     if (timeout) contentValues.timeoutHours = Number(timeout);
     contentValues.maxClarifications = Number(byId("clarifications").value);
     if (currentDraft?.content?.postIds)
@@ -1362,6 +1366,7 @@
     else
       editorDirty =
         !!byId("automation-name").value ||
+        byId("allow-keyword-typos").checked ||
         Object.values(editorValues().content).some(
           (value) => typeof value === "string" && value,
         );
@@ -1857,7 +1862,7 @@
       case "comment.received":
         return "Comment received";
       case "run.created":
-        return "Comment matched this automation";
+        return entry.text || "Comment matched this automation";
       case "send.accepted":
         return action + " accepted by Instagram";
       case "send.unknown":

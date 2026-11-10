@@ -10,7 +10,7 @@ New runs use the published version. Active conversations retain their starting v
 
 ## Follow a conversation
 
-“Pricing?” matches the whole word `pricing`. Priority chooses between matching rules. While one run owns the conversation, another comment cannot start a competing run. Replies count even while Instagram acknowledges the question. The run can ask for clarification or time out without a usable email. [Matching and reply handling](design.md)
+“Pricing?” matches the whole word `pricing`. Enable **Allow simple typos** and publish to catch `prcing` too. Exact rules take priority. If several rules fit only by typo, the router skips the comment. While one run owns the conversation, another comment cannot start a competing run. Replies count even while Instagram acknowledges the question. The run can ask for clarification or time out without a usable email. [Matching and reply handling](design.md)
 
 The timeline shows which rule won, email validation and sends Instagram accepted. Acceptance cannot prove someone read the message. A correctly formatted email creates a lead and queues a CRM update. A CRM outage does not delay the link DM. Check email ownership and marketing consent separately. [Leads API](integration.md)
 

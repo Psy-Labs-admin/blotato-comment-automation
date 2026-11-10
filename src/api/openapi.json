@@ -1101,6 +1101,11 @@
             "maxLength": 60,
             "pattern": "^[^\\u0000\\uD800-\\uDFFF]*$"
           },
+          "allowKeywordTypos": {
+            "type": "boolean",
+            "default": false,
+            "description": "Opt in to one simple typo in a whole-word keyword or a contiguous phrase. Only Latin or Cyrillic words of at least six letters qualify. Exact matches win. If two rules only match by typo, neither starts."
+          },
           "publicReply": {
             "type": "string",
             "maxLength": 1000,

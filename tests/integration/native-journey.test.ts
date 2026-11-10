@@ -22,6 +22,7 @@ import { createTestAccess } from '../helpers/test-access';
 /** One disposable workspace exercises the native HTTP entry points and the durable worker together. */
 it.each([
   { scenario: 'clean duplicated reply', rejected: [] },
+  { scenario: 'misspelled pricing comment with typo handling enabled', commentText: '#prcing!', allowKeywordTypos: true, rejected: [] },
   { scenario: 'malformed address then two addresses in one DM', rejected: [
     { text: 'buyer@example.com@other.io', result: 'invalid', reason: 'email_invalid' },
     { text: 'buyer@example.com or other@example.org', result: 'ambiguous', reason: 'email_ambiguous' },
@@ -29,7 +30,7 @@ it.each([
   { scenario: 'invisible character in address', rejected: [
     { text: 'al\u200Bice@example.com', result: 'invalid', reason: 'email_invalid' },
   ] },
-])('connects Instagram, publishes a draft, and captures one corrected lead and link: $scenario', async ({ rejected }) => {
+])('connects Instagram, publishes a draft, and captures one corrected lead and link: $scenario', async ({ rejected, commentText = 'Pricing please', allowKeywordTypos }) => {
   const data = await createTestDb();
   const auth = createTestAccess();
   const tenantId = await createTenant(data.db, 'Native journey verification');
@@ -127,7 +128,7 @@ it.each([
     expect(credential.encrypted_token).not.toContain(longToken);
     expect((await getInstagramCredentials({ db: data.db, encryptionKey: config.encryptionKey }, accountId)).token).toBe(longToken);
 
-    const content = { keyword: 'pricing', publicReply: 'Sent you a DM!', emailPrompt: 'Reply with your email address.',
+    const content = { keyword: 'pricing', allowKeywordTypos, publicReply: 'Sent you a DM!', emailPrompt: 'Reply with your email address.',
       linkText: 'Here is the requested information.', linkUrl: 'https://example.org/pricing', timeoutHours: 1,
       maxClarifications: 1, clarificationText: 'Please send a valid email address.' };
     expect((await app.inject({ method: 'POST', url: '/operator/automations', headers: session,
@@ -176,7 +177,7 @@ it.each([
     }
     const comment = { object: 'instagram', entry: [{ id: accountId, time: Math.floor(Date.now() / 1000), changes: [
       { field: 'comments', value: { id: commentId, from: { id: participantId, username: 'journey_participant' },
-        media: { id: mediaId }, text: 'Pricing please', timestamp: new Date().toISOString() } },
+        media: { id: mediaId }, text: commentText, timestamp: new Date().toISOString() } },
     ] }] };
     const commentAcks = await Promise.all([deliver(comment), deliver(comment)]);
     expect(commentAcks.map((response) => response.statusCode)).toEqual([200, 200]);

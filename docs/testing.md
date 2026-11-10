@@ -21,7 +21,7 @@ Start with duplicate DMs and replies that go unanswered.
 
 | Incoming text | What the tests check |
 |---|---|
-| `#PRICING!` or `prcing` | The first comment matches. The typo stays unmatched. Keywords use whole words. |
+| `#PRICING!` or `prcing` | The first matches by default. Enable and publish **Allow simple typos** to catch `prcing`. Two typo-only rules on the same post start no run. |
 | `buyer@example.com@other.io` or an invisible character inside an address | No partial address becomes a lead. The worker can ask for clarification within the rule’s limit. |
 | Two different addresses in one DM | The worker waits for one clear answer. A correction delivered twice still produces one lead and one link. |
 | `STOP!!` or `Unsubscribe ❤️` | The active run is cancelled and later triggers are suppressed. A sentence containing “stop” is ordinary text. |

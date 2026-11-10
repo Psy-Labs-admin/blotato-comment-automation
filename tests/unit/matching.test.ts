@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractEmail, isStopCommand, matchesKeyword } from '../../src/domain/matching';
+import { classifyKeywordMatch, extractEmail, isStopCommand, matchesKeyword, tokenize } from '../../src/domain/matching';
 
 describe('matchesKeyword (whole word, case-insensitive)', () => {
   it('matches the keyword wrapped in punctuation and a hashtag', () => {
@@ -26,6 +26,87 @@ describe('matchesKeyword (whole word, case-insensitive)', () => {
   });
   it('normalises full-width characters (NFKC)', () => {
     expect(matchesKeyword('ｐｒｉｃｉｎｇ', 'pricing')).toBe(true);
+  });
+});
+
+describe('classifyKeywordMatch', () => {
+  const classify = (text: string, keyword = 'pricing', allowTypos = true) =>
+    classifyKeywordMatch(tokenize(text), keyword, allowTypos);
+
+  it.each(['#PRICING!', 'ｐｒｉｃｉｎｇ', 'send pricing please'])(
+    'preserves normalized exact matches with either setting: %s', (text) => {
+      expect(classify(text)).toBe('exact');
+      expect(classify(text, 'pricing', false)).toBe('exact');
+    },
+  );
+  it.each(['prcing', 'priicng', 'pricign', 'rpicing', 'priicing', 'pricingg', 'ppricing'])(
+    'accepts one eligible typing error: %s', (text) => {
+      expect(classify(text)).toBe('typo');
+      expect(classify(text, 'pricing', false)).toBeNull();
+      expect(matchesKeyword(text, 'pricing')).toBe(false);
+    },
+  );
+  it.each([
+    'priz ing', 'prizing', 'pricingplan', 'surpricing', 'rpricing', 'priciingg',
+    'prcingg', 'pricngg', 'ricing', 'pricin', 'pricnigx', 'pric ing',
+    'pricxng', 'pricxing', 'prіcing', 'pric1ng', '', '🫶',
+  ])('rejects unsupported errors or partial tokens: %s', (text) => {
+    expect(classify(text)).toBeNull();
+  });
+  it.each(['go', 'цена', '123456', 'price1', 'prіcing'])(
+    'keeps short, numeric and mixed-script exact matches: %s', (keyword) => {
+      expect(classify(keyword, keyword)).toBe('exact');
+      expect(classify(keyword, keyword, false)).toBe('exact');
+      expect(classify(keyword + keyword.at(-1), keyword)).toBeNull();
+    },
+  );
+  it('only accepts contiguous phrases with one altered word across the entire phrase', () => {
+    expect(classify('send prcing details please', 'pricing details')).toBe('typo');
+    expect(classify('send pricing detials please', 'pricing details')).toBe('typo');
+    expect(classify('prcing detials', 'pricing details')).toBeNull();
+    expect(classify('pricing extra details', 'pricing details')).toBeNull();
+    expect(classify('prcing extra details', 'pricing details')).toBeNull();
+    expect(classify('pricing detials', 'pricing details', false)).toBeNull();
+  });
+  it('prefers an exact occurrence even after an earlier typo occurrence', () => {
+    expect(classify('prcing details then pricing details', 'pricing details')).toBe('exact');
+    expect(classify('pricing details then prcing details', 'pricing details')).toBe('exact');
+    expect(classify('prcing details then pricing details', 'pricing details', false)).toBe('exact');
+  });
+  it('normalizes the keyword and handles empty keywords', () => {
+    expect(classify('pricing', 'ＰＲＩＣＩＮＧ!')).toBe('exact');
+    expect(classify('prcing', 'ＰＲＩＣＩＮＧ!')).toBe('typo');
+    expect(classify('pricing', '🫶')).toBeNull();
+    expect(classify('', 'pricing')).toBeNull();
+  });
+  it.each(['стоимсть', 'сотимость', 'тсоимость', 'стоимосьт', 'стооимость', 'стоимостьь'])(
+    'supports the same conservative edits in Cyrillic: %s', (text) => {
+      expect(classify(text, 'СТОИМОСТЬ')).toBe('typo');
+    },
+  );
+  it.each(['стоимасть', 'тоимость', 'стоимост', 'стоимостb', 'стоимос2ть'])(
+    'rejects unsupported Cyrillic edits: %s', (text) => {
+      expect(classify(text, 'стоимость')).toBeNull();
+    },
+  );
+  it('rejects deletions of repeated edge letters even when the outer letters look unchanged', () => {
+    expect(classify('pricing', 'ppricing')).toBeNull();
+    expect(classify('pricing', 'pricingg')).toBeNull();
+  });
+  it('accepts every eligible interior deletion, adjacent transposition and duplicate in a distinct-letter word', () => {
+    const keyword = 'abcdefghi';
+    for (let i = 1; i < keyword.length - 1; i++) {
+      expect(classify(keyword.slice(0, i) + keyword.slice(i + 1), keyword)).toBe('typo');
+
+    }
+    for (let i = 0; i + 1 < keyword.length; i++) {
+      const swapped = keyword.slice(0, i) + keyword[i + 1] + keyword[i] + keyword.slice(i + 2);
+      expect(classify(swapped, keyword)).toBe('typo');
+    }
+    for (let i = 0; i < keyword.length; i++) {
+      expect(classify(keyword.slice(0, i) + keyword[i] + keyword.slice(i), keyword)).toBe('typo');
+      expect(classify(keyword.slice(0, i) + 'z' + keyword.slice(i + 1), keyword)).toBeNull();
+    }
   });
 });
 

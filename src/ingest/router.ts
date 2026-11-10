@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import type { Clock } from '../domain/clock';
 import type { AutomationDefinition } from '../domain/definition';
-import { matchesKeyword } from '../domain/matching';
+import { classifyKeywordMatch, tokenize } from '../domain/matching';
 import { Reason } from '../domain/reasons';
 import { audit } from '../storage/audit';
 import { withTx } from '../storage/db';
@@ -98,18 +98,32 @@ async function routeComment(c: PoolClient, ev: any, conv: any, now: Date): Promi
       ORDER BY a.priority DESC, a.id ASC`,
     [ev.tenant_id, ev.connection_id],
   );
-  const matching = candidates.rows.filter((a) => {
+  const words = tokenize(ev.text);
+  const matching = candidates.rows.flatMap((a) => {
     const def = a.definition as AutomationDefinition;
-    if (def.trigger.type !== 'comment.created' || !matchesKeyword(ev.text, def.trigger.keyword)) return false;
-    return def.trigger.posts === 'all_supported' || def.trigger.posts.mediaIds.includes(ev.media_id);
+    if (def.trigger.type !== 'comment.created') return [];
+    if (def.trigger.posts !== 'all_supported' && !def.trigger.posts.mediaIds.includes(ev.media_id)) return [];
+    const matchKind = classifyKeywordMatch(words, def.trigger.keyword, def.trigger.match === 'whole_word_with_typos');
+    return matchKind ? [{ ...a, matchKind }] : [];
   });
   if (!matching.length) return { outcome: Reason.NO_MATCH, runId: null, outbox: false };
 
-  const [winner, ...losers] = matching;
-  for (const loser of losers) {
+  // Exact matches retain priority/ID ordering. Typo tolerance must never steal an exact trigger.
+  const exact = matching.filter((a) => a.matchKind === 'exact');
+  if (!exact.length && matching.length > 1) {
+    await audit(c, {
+      tenantId: ev.tenant_id, conversationId: conv.id, eventId: ev.id, type: 'trigger.suppressed',
+      reason: Reason.AMBIGUOUS_KEYWORD, data: { matchKind: 'typo', candidateCount: matching.length },
+    });
+    return { outcome: Reason.AMBIGUOUS_KEYWORD, runId: null, outbox: false };
+  }
+  const winner = exact[0] ?? matching[0];
+  for (const loser of matching) {
+    if (loser.id === winner.id) continue;
     await audit(c, {
       tenantId: ev.tenant_id, conversationId: conv.id, eventId: ev.id, type: 'automation.not_selected',
-      reason: Reason.LOWER_PRIORITY, data: { automationId: loser.id, winnerAutomationId: winner.id },
+      reason: loser.matchKind === 'typo' ? Reason.EXACT_MATCH_PREFERRED : Reason.LOWER_PRIORITY,
+      data: { automationId: loser.id, winnerAutomationId: winner.id },
     });
   }
 
@@ -126,7 +140,7 @@ async function routeComment(c: PoolClient, ev: any, conv: any, now: Date): Promi
   if (suppression) {
     await audit(c, {
       tenantId: ev.tenant_id, conversationId: conv.id, eventId: ev.id, type: 'trigger.suppressed', reason: suppression,
-      data: { automationId: winner.id, ownerRunId: conv.owner_run_id ?? undefined },
+      data: { automationId: winner.id, ownerRunId: conv.owner_run_id ?? undefined, ...(winner.matchKind === 'typo' ? { matchKind: 'typo' } : {}) },
     });
     return { outcome: suppression, runId: null, outbox: false };
   }
@@ -142,7 +156,7 @@ async function routeComment(c: PoolClient, ev: any, conv: any, now: Date): Promi
   await enqueueOutbox(c, { tenantId: ev.tenant_id, kind: 'workflow.start', idempotencyKey: `start:${runId}`, payload: { runId } });
   await audit(c, {
     tenantId: ev.tenant_id, runId, conversationId: conv.id, eventId: ev.id, type: 'run.created', reason: Reason.STARTED,
-    data: { automationId: winner.id, version: winner.version, mediaId: ev.media_id, commentId: ev.comment_id },
+    data: { automationId: winner.id, version: winner.version, mediaId: ev.media_id, commentId: ev.comment_id, ...(winner.matchKind === 'typo' ? { matchKind: 'typo' } : {}) },
   });
   return { outcome: Reason.STARTED, runId, outbox: true };
 }

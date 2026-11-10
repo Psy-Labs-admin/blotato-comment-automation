@@ -7,6 +7,7 @@ import { parseCapabilities, missingCapabilities, type IntegrationMode } from '..
 const OptionalText = storableText.max(1000);
 export const DraftContentSchema = z.object({
   keyword: storableText.max(60).optional(),
+  allowKeywordTypos: z.boolean().optional(),
   publicReply: OptionalText.optional(),
   emailPrompt: OptionalText.optional(),
   linkText: OptionalText.optional(),
@@ -63,7 +64,8 @@ export function draftDefinition(content: DraftContent): AutomationDefinition {
   return parseDefinition({
     schemaVersion: 1,
     trigger: {
-      type: 'comment.created', platform: 'instagram', keyword: content.keyword, match: 'whole_word_case_insensitive',
+      type: 'comment.created', platform: 'instagram', keyword: content.keyword,
+      match: content.allowKeywordTypos ? 'whole_word_with_typos' : 'whole_word_case_insensitive',
       posts: content.postIds?.length ? { mediaIds: content.postIds } : 'all_supported',
     },
     steps: [

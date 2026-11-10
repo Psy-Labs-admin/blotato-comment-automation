@@ -135,13 +135,14 @@ describe('operator drafts and trusted accounts', () => {
     expect((await publish(app, tenant, draft.id, 1)).json().draft.status).toBe('paused');
     expect((await data.db.query('SELECT status FROM automations WHERE id = $1', [first.json().automationId])).rows[0].status).toBe('disabled');
     const saved = await app.inject({ method: 'PATCH', url: '/operator/automations/' + draft.id, headers: headers(tenant),
-      payload: { expectedRevision: 1, content: { ...content, linkUrl: 'https://company.example/new' } } });
+      payload: { expectedRevision: 1, content: { ...content, allowKeywordTypos: true, linkUrl: 'https://company.example/new' } } });
     expect(saved.statusCode).toBe(200);
     expect((await publish(app, tenant, draft.id, 1)).statusCode).toBe(409);
     const second = await publish(app, tenant, draft.id, 2);
     expect(second.json()).toMatchObject({ automationId: first.json().automationId, version: 2, draft: { revision: 2, publishedRevision: 2 } });
     const versions = (await data.db.query('SELECT definition FROM automation_versions WHERE automation_id = $1 ORDER BY version', [first.json().automationId])).rows;
     expect(versions).toHaveLength(2);
+    expect(versions.map((row) => row.definition.trigger.match)).toEqual(['whole_word_case_insensitive', 'whole_word_with_typos']);
     expect(versions[0].definition.steps[3].text).toContain('https://company.example/pricing');
     expect(versions[1].definition.steps[3].text).toContain('https://company.example/new');
   });

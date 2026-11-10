@@ -45,10 +45,12 @@ it('expresses strict draft replacement inputs, revision checks, and required nul
   const patch = schemaFor('#/components/schemas/UpdateDraft');
   expect(patch({ expectedRevision: 1, connectionId: null, content: {} })).toBe(true);
   expect(patch({ expectedRevision: 1, name: 'Привет 👩‍💻' })).toBe(true);
+  expect(patch({ expectedRevision: 1, content: { keyword: 'pricing', allowKeywordTypos: true } })).toBe(true);
   for (const invalid of [
     {},
     { expectedRevision: 0 },
     { expectedRevision: 1, content: { typo: true } },
+    { expectedRevision: 1, content: { allowKeywordTypos: 'true' } },
     { expectedRevision: 1, name: 'bad\u0000name' },
     { expectedRevision: 1, content: { postIds: ['bad\ud800id'] } },
     { expectedRevision: 1, unknown: true },
@@ -143,7 +145,8 @@ describe('public API runtime responses match the published contract', () => {
     await request('GET', '/workspace', '/workspace');
     await request('GET', '/accounts', '/accounts');
     const content = {
-      keyword: 'guide',
+      keyword: 'pricing',
+      allowKeywordTypos: true,
       publicReply: 'Check your messages.',
       emailPrompt: 'What is your email?',
       linkText: 'Your guide',
@@ -174,7 +177,7 @@ describe('public API runtime responses match the published contract', () => {
       method: 'POST',
       url: '/webhooks/instagram',
       ...auth.signedWebhook(
-        commentEvent({ accountId: tenant.accountId, from: 'contract_participant', text: 'guide please' }),
+        commentEvent({ accountId: tenant.accountId, from: 'contract_participant', text: 'prcing please' }),
       ),
     });
     expect(event.statusCode, event.body).toBe(202);

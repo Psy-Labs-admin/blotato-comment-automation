@@ -38,7 +38,7 @@ export const AutomationDefinitionSchema = z.object({
     type: z.literal('comment.created'),
     platform: z.literal('instagram'),
     keyword: storableText.trim().min(1).max(60),
-    match: z.literal('whole_word_case_insensitive'),
+    match: z.enum(['whole_word_case_insensitive', 'whole_word_with_typos']),
     posts: z.union([z.literal('all_supported'), z.object({ mediaIds: z.array(storableText.min(1)).min(1) })]),
   }),
   steps: z.array(StepSchema).min(1).max(10),
